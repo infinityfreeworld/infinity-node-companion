@@ -38,8 +38,9 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    middleware as axum_middleware,
     response::{IntoResponse, Json},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use image::{ImageBuffer, Rgba};
@@ -66,15 +67,20 @@ use tray_icon::{
     Icon, TrayIconBuilder,
 };
 
+mod api;
 mod autostart;
 mod bandwidth;
 mod kubo;
 mod nostr_relay;
 mod pinning;
+mod security;
 mod stream;
 mod supervisor;
 
 use bandwidth::BandwidthTracker;
+use infinity_auth::AuthService;
+use infinity_identity::Identity;
+use infinity_vault::Vault;
 use kubo::{KuboBackend, KuboMetrics};
 use nostr_relay::NostrRelayBackend;
 use pinning::{KuboPinClient, PinPolicy, PinRecord, PinTracker};
@@ -102,6 +108,10 @@ pub struct AppState {
     pub bandwidth:     Arc<BandwidthTracker>,
     pub pins:          PinTracker,
     pub pin_client:    Option<KuboPinClient>,
+    // Phase 2.F — security stack (vault chiffré + identité + auth bridge)
+    pub vault:         Arc<Vault>,
+    pub identity:      Arc<Identity>,
+    pub auth:          Arc<AuthService>,
 }
 
 // ── Contrat handshake ────────────────────────────────────────────────────
@@ -311,7 +321,38 @@ async fn serve_http(state: AppState) {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // Phase 2.F — sous-router pour les routes PROTÉGÉES par signature.
+    // Le middleware `api::auth_middleware` valide le header
+    // `Authorization: InfinitySig <pubkey>:<ts>:<sig>` avant de passer
+    // au handler. Toutes les routes vault / identity / auth/devices
+    // sont scopées ici.
+    let protected = Router::new()
+        .route("/auth/devices",            get(api::list_devices))
+        .route("/auth/devices/:pubkey",    delete(api::revoke_device))
+        .route("/identity/pubkey",         get(api::identity_pubkey))
+        .route("/identity/sign",           post(api::identity_sign))
+        .route("/vault",                   get(api::vault_list_namespaces))
+        .route("/vault/:ns",               get(api::vault_list))
+        .route("/vault/:ns/:key",
+               put(api::vault_put)
+                 .get(api::vault_get)
+                 .delete(api::vault_delete))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            api::auth_middleware,
+        ));
+
+    // Phase 2.F — sous-router pour les routes PUBLIQUES de pairing.
+    // Pas d'auth ici car c'est l'établissement initial de la confiance.
+    // Le `pair/complete` est protégé par le pairing token (généré via
+    // tray, distribué out-of-band).
+    let pairing = Router::new()
+        .route("/pair/complete",        post(api::pair_complete))
+        .route("/pair/companion-pubkey", get(api::get_companion_pubkey));
+
     let app = Router::new()
+        // Routes existantes (publiques pour rétrocompat — handshake n'expose
+        // pas d'info sensible, juste des metrics agrégées).
         .route("/api/handshake",   get(handshake))
         .route("/api/stream",      get(stream::ws_handler))
         .route("/api/pin",         post(post_pin))
@@ -319,6 +360,9 @@ async fn serve_http(state: AppState) {
         .route("/api/pins",        get(get_pins))
         .route("/api/policy",      get(get_policy).put(put_policy))
         .route("/healthz",         get(healthz))
+        // Phase 2.F — montage des nouveaux sous-routers.
+        .merge(pairing)
+        .merge(protected)
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
@@ -373,7 +417,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pin_client = kubo.as_ref().map(|k| k.pin_client());
     pinning::spawn_janitor(rt.handle(), pins.clone(), pin_client.clone());
 
-    // 5. État partagé (capture les Arc/Strings des backends)
+    // 5. Phase 2.F — security stack : vault chiffré + identité Ed25519 +
+    // auth bridge. Boot fail si Keychain OS indispo (Linux sans
+    // gnome-keyring) — on log un message exploitable et on exit.
+    let security = match security::init() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("\n  ⚠️  Échec init security stack : {e}");
+            eprintln!("  Linux : installe gnome-keyring ou KWallet et relance.\n");
+            return Err(Box::new(e));
+        }
+    };
+    info!(
+        pubkey = %security.identity.public_key(),
+        data_dir = ?security.data_dir,
+        "security stack ready",
+    );
+
+    // 6. État partagé (capture les Arc/Strings des backends + security)
     let state = AppState {
         started_at:    Arc::new(Instant::now()),
         enabled:       Arc::new(AtomicBool::new(true)),
@@ -383,6 +444,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bandwidth:     bandwidth.clone(),
         pins:          pins.clone(),
         pin_client,
+        vault:         security.vault.clone(),
+        identity:      security.identity.clone(),
+        auth:          security.auth.clone(),
     };
 
     // 6. HTTP server task
@@ -416,6 +480,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let item_bw            = MenuItem::new(format!("BP du jour : 0 / {cap_mb} Mo"), false, None);
     let item_open          = MenuItem::new("Ouvrir Infinity", true, None);
     let item_toggle        = MenuItem::new("Mettre en pause", true, None);
+    // Phase 2.F — génère un pairing token affiché dans les logs
+    // (out-of-band : aucun JS ne peut le lire, seul l'utilisateur
+    // assis devant la machine voit la console / fichier de log).
+    let item_pair          = MenuItem::new("Appairer un nouvel appareil…", true, None);
     let item_autostart     = CheckMenuItem::new(
         "Démarrer à l'ouverture de session",
         autostart.is_some(),
@@ -433,6 +501,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&item_open)?;
     menu.append(&item_toggle)?;
+    menu.append(&item_pair)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&item_autostart)?;
     menu.append(&PredefinedMenuItem::separator())?;
@@ -440,6 +509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let id_open      = item_open.id().clone();
     let id_toggle    = item_toggle.id().clone();
+    let id_pair      = item_pair.id().clone();
     let id_autostart = item_autostart.id().clone();
     let id_quit      = item_quit.id().clone();
 
@@ -454,6 +524,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pwa_url_owned    = pwa_url.clone();
     let pins_for_loop    = pins.clone();
     let bw_for_loop      = bandwidth.clone();
+    let auth_for_loop    = state.auth.clone();
     let mut last_refresh = Instant::now();
 
     // Backends détenus DANS la closure pour qu'ils survivent jusqu'à Quit.
@@ -497,6 +568,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     item_toggle.set_text(if now_enabled { "Mettre en pause" } else { "Reprendre" });
                     item_status.set_text(if now_enabled { "Statut : Actif" } else { "Statut : En pause" });
                     info!("companion toggled → enabled={now_enabled}");
+                }
+                id if id == &id_pair => {
+                    // Phase 2.F — out-of-band pairing : on génère le token
+                    // et on l'AFFICHE seulement dans la console (logs).
+                    // Aucune route HTTP ne le retourne — un site malveillant
+                    // ne peut donc PAS s'auto-appairer en silence. Le user
+                    // doit avoir accès physique/SSH à la machine pour le
+                    // lire, puis le coller manuellement dans la PWA.
+                    let token = auth_for_loop.create_pairing_token(None);
+                    println!(
+                        "\n\
+                         ╔══════════════════════════════════════════════════════════════════╗\n\
+                         ║  PAIRING TOKEN — valide 10 min, à coller dans la PWA Infinity    ║\n\
+                         ╠══════════════════════════════════════════════════════════════════╣\n\
+                         ║  {}  ║\n\
+                         ╚══════════════════════════════════════════════════════════════════╝\n",
+                        token.token
+                    );
+                    info!("pairing token generated (visible in console only)");
                 }
                 id if id == &id_autostart => {
                     if let Some(auto) = autostart.as_ref() {

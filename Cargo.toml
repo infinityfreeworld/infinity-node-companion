@@ -75,6 +75,18 @@ reqwest     = { version = "0.12", default-features = false, features = ["json", 
 which       = "6"
 dirs        = "5"
 
+# Phase 2.F — security stack interne (crates workspace).
+# Le binaire orchestre Vault (chiffré) + Identity (Ed25519 Keychain OS)
+# + AuthService (pairing + signed requests). Cf. src/security.rs +
+# src/api.rs pour les détails d'intégration.
+infinity-vault    = { path = "crates/vault" }
+infinity-identity = { path = "crates/identity" }
+infinity-auth     = { path = "crates/auth" }
+secrecy           = "0.8"   # SecretString pour passer la passphrase au vault
+rand              = "0.8"   # OsRng pour générer la boot passphrase
+hex               = "0.4"   # encode boot passphrase + pubkey (logs/responses)
+thiserror         = "1"     # SecurityInitError dans security.rs
+
 [profile.release]
 opt-level = "z"      # taille binaire optimale (objectif < 10 Mo)
 lto       = true
