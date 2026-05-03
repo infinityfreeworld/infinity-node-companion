@@ -74,6 +74,7 @@ mod kubo;
 mod nostr_relay;
 mod pinning;
 mod relay_api;
+mod relay_installer;
 mod security;
 mod stream;
 mod supervisor;
@@ -88,10 +89,22 @@ use pinning::{KuboPinClient, PinPolicy, PinRecord, PinTracker};
 
 // ── Constantes ───────────────────────────────────────────────────────────
 
-const BIND_ADDR:    &str = "127.0.0.1:7474";
-const SERVICE_TAG:  &str = "infinity-node";
-const VERSION:      &str = env!("CARGO_PKG_VERSION");
-const DEFAULT_PWA_URL: &str = "https://localhost:5173";
+/// Bind par défaut du HTTP API. Modifiable via env `INFINITY_BIND_ADDR`.
+///
+/// Phase 3.B — pour permettre à d'autres devices (tablette, smartphone)
+/// du même réseau LAN ou via Tailscale d'atteindre ce companion :
+///
+///   INFINITY_BIND_ADDR=0.0.0.0:7474 infinity-node          # tout le LAN
+///   INFINITY_BIND_ADDR=100.64.1.5:7474 infinity-node       # IP Tailscale
+///
+/// **Sécurité** : ouvrir 0.0.0.0 expose l'API au réseau local. C'est OK
+/// car toutes les routes sensibles (vault/identity/auth) sont protégées
+/// par signature Ed25519 (Phase 2.D). La PWA des autres devices doit
+/// être appairée séparément (pairing token out-of-band depuis le tray).
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7474";
+const SERVICE_TAG:       &str = "infinity-node";
+const VERSION:           &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_PWA_URL:   &str = "https://localhost:5173";
 
 /// Cap journalier par défaut, configurable via env `INFINITY_BW_CAP_MB`.
 /// 5 Go/jour = ~150 Go/mois — raisonnable pour un nœud résidentiel sur fibre.
@@ -402,12 +415,22 @@ async fn serve_http(state: AppState) {
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
-    let addr: SocketAddr = BIND_ADDR.parse().expect("addr parse");
+    let bind_addr = std::env::var("INFINITY_BIND_ADDR")
+        .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
+    let addr: SocketAddr = match bind_addr.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("\n  ⚠️  INFINITY_BIND_ADDR='{bind_addr}' invalide : {e}");
+            eprintln!("  Format attendu : <ip>:<port>, ex. 0.0.0.0:7474\n");
+            std::process::exit(1);
+        }
+    };
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("\n  ⚠️  Impossible de bind {} : {e}", BIND_ADDR);
-            eprintln!("  Une autre instance d'Infinity Node tourne déjà ?\n");
+            eprintln!("\n  ⚠️  Impossible de bind {bind_addr} : {e}");
+            eprintln!("  Une autre instance d'Infinity Node tourne déjà ?");
+            eprintln!("  (ou port déjà occupé — tente INFINITY_BIND_ADDR=127.0.0.1:7475)\n");
             std::process::exit(1);
         }
     };
@@ -508,7 +531,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n  ┌─────────────────────────────────────────────────┐");
     println!("  │  Infinity Node v{:<32}│", VERSION);
     println!("  │                                                 │");
-    println!("  │  Handshake : http://{}/api/handshake │", BIND_ADDR);
+    let bind_display = std::env::var("INFINITY_BIND_ADDR")
+        .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
+    println!("  │  Handshake : http://{}/api/handshake │", bind_display);
     println!("  │  Kubo      : {:<35}│", kubo_status);
     println!("  │  NOSTR     : {:<35}│", nostr_status);
     println!("  │  PWA cible : {:<35}│", pwa_url);
