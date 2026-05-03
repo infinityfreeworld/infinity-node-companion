@@ -60,7 +60,7 @@ jobs:
       - name: Create .dmg
         run: |
           BUNDLE_PATH=$(find target/release/bundle/osx -name "*.app" -type d | head -1)
-          DMG_NAME="Infinity-Node-${{ github.ref_name }}-mac.dmg"
+          DMG_NAME="Infinity-Node-mac.dmg"
           hdiutil create -volname "Infinity Node" \
             -srcfolder "$BUNDLE_PATH" \
             -ov -format UDZO \
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
-          path: Infinity-Node-${{ github.ref_name }}-mac.dmg
+          path: Infinity-Node-mac.dmg
 
   # ── 2. Windows — .msi installer ─────────────────────────────────────
   build-windows:
@@ -99,12 +99,12 @@ jobs:
         shell: bash
         run: |
           MSI=$(find target/wix -name "*.msi" | head -1)
-          mv "$MSI" "Infinity-Node-${{ github.ref_name }}-win.msi"
+          mv "$MSI" "Infinity-Node-win.msi"
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-msi
-          path: Infinity-Node-${{ github.ref_name }}-win.msi
+          path: Infinity-Node-win.msi
 
   # ── 3. Linux — AppImage portable ────────────────────────────────────
   build-linux:
@@ -153,12 +153,12 @@ jobs:
 
       - name: Build AppImage
         run: |
-          ./appimagetool --appimage-extract-and-run AppDir Infinity-Node-${{ github.ref_name }}-linux.AppImage
+          ./appimagetool --appimage-extract-and-run AppDir Infinity-Node-linux.AppImage
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: Infinity-Node-${{ github.ref_name }}-linux.AppImage
+          path: Infinity-Node-linux.AppImage
 
   # ── 4. Crée le GitHub Release et y attache les 3 artefacts ──────────
   release:
@@ -184,14 +184,14 @@ jobs:
           body: |
             ## Téléchargements
 
-            - **macOS** : `Infinity-Node-${{ github.ref_name }}-mac.dmg`
+            - **macOS** : `Infinity-Node-mac.dmg`
               - Double-clique le .dmg, glisse l'icône vers Applications
               - 1ʳᵉ ouverture : clic droit sur l'app → **Ouvrir** (bypass Gatekeeper)
 
-            - **Windows** : `Infinity-Node-${{ github.ref_name }}-win.msi`
+            - **Windows** : `Infinity-Node-win.msi`
               - Double-clic le .msi → wizard d'installation
               - 1ʳᵉ exécution : SmartScreen → **Plus d'infos** → **Exécuter quand même**
 
-            - **Linux** : `Infinity-Node-${{ github.ref_name }}-linux.AppImage`
+            - **Linux** : `Infinity-Node-linux.AppImage`
               - `chmod +x` puis double-clic, ou `./Infinity-Node-*.AppImage`
               - Aucun warning sur la plupart des distros
