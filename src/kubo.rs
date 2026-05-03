@@ -37,6 +37,7 @@
 //! recopie dans sa réponse.
 
 use crate::bandwidth::BandwidthTracker;
+use crate::ipfs_private::{disable_public_bootstrap, is_repo_in_private_mode};
 use crate::pinning::KuboPinClient;
 use crate::supervisor::ManagedChild;
 use serde::Deserialize;
@@ -101,9 +102,26 @@ impl KuboBackend {
             return None;
         }
 
+        // Phase 3-IPFS-A — détection mode privé. Si swarm.key existe
+        // dans le repo, on lance Kubo avec LIBP2P_FORCE_PNET=1 qui
+        // refuse TOUT peer sans la même clé (réseau privé fermé).
+        // On désactive aussi les bootstrap publics (sinon Kubo essaie
+        // quand même de joindre le DHT mondial qui rejettera mais
+        // consomme cycles).
+        let private = is_repo_in_private_mode(&repo);
+        if private {
+            if let Err(e) = disable_public_bootstrap(&repo) {
+                warn!("disable_public_bootstrap: {e}");
+            }
+            info!("kubo: démarrage en MODE PRIVÉ (swarm.key détectée)");
+        }
+
         let mut cmd = Command::new(BIN);
         cmd.args(["daemon", "--migrate=true", "--enable-pubsub-experiment"])
             .env("IPFS_PATH", &repo);
+        if private {
+            cmd.env("LIBP2P_FORCE_PNET", "1");
+        }
         let child = ManagedChild::spawn("kubo", cmd)?;
 
         let metrics = Arc::new(KuboMetrics::default());
