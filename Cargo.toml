@@ -91,6 +91,13 @@ thiserror         = "1"     # SecurityInitError dans security.rs
 # au 1ᵉʳ run si binaire pas trouvé sur PATH). Cf. src/relay_installer.rs.
 sha2              = "0.10"  # SHA-256 verify du download
 
+# Phase 3-IPFS-A — swarm.key génération (rand) — utilisé par ipfs_private.rs.
+# `rand` est déjà tiré plus haut, on n'a besoin que de tempfile en dev pour
+# les tests d'I/O sur le repo IPFS factice.
+
+[dev-dependencies]
+tempfile          = "3"     # tests I/O ipfs_private (write/read swarm.key)
+
 [profile.release]
 opt-level = "z"      # taille binaire optimale (objectif < 10 Mo)
 lto       = true

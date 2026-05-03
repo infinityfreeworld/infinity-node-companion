@@ -70,6 +70,8 @@ use tray_icon::{
 mod api;
 mod autostart;
 mod bandwidth;
+mod ipfs_api;
+mod ipfs_private;
 mod kubo;
 mod nostr_relay;
 mod pinning;
@@ -362,6 +364,14 @@ async fn serve_http(state: AppState) {
         .route("/relay/private/owner",
                get(relay_api::get_owner_pubkey)
                  .post(relay_api::set_owner_pubkey))
+        // Phase 3-IPFS-A — gestion de la swarm.key (mode IPFS privé).
+        // GET = lit la clé en clair (à protéger comme un secret côté UI),
+        // POST = générer ou importer une swarm.key,
+        // DELETE = retour au mode IPFS public.
+        .route("/ipfs/private/swarm-key",
+               get(ipfs_api::get_swarm_key)
+                 .post(ipfs_api::set_swarm_key)
+                 .delete(ipfs_api::delete_swarm_key))
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             api::auth_middleware,
@@ -399,6 +409,12 @@ async fn serve_http(state: AppState) {
     let private_relay_public = Router::new()
         .route("/relay/private/info", get(relay_api::get_private_relay_info));
 
+    // Phase 3-IPFS-A — info publique du nœud IPFS privé (mode actif ?
+    // fingerprint de la swarm.key pour vérification visuelle, etc.).
+    // Sans auth car c'est juste de la discovery sur l'état du nœud.
+    let private_ipfs_public = Router::new()
+        .route("/ipfs/private/info", get(ipfs_api::get_private_ipfs_info));
+
     let app = Router::new()
         // Routes 100 % publiques — métriques agrégées non sensibles
         // (pas d'auth requise pour le service-discovery côté PWA).
@@ -411,6 +427,8 @@ async fn serve_http(state: AppState) {
         .merge(protected)
         // Phase 3.A — info publique du relai privé (discovery)
         .merge(private_relay_public)
+        // Phase 3-IPFS-A — info publique du nœud IPFS privé (discovery)
+        .merge(private_ipfs_public)
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
