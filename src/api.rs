@@ -51,7 +51,9 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 // MIDDLEWARE — exige une signature Authorization valide
 // ════════════════════════════════════════════════════════════════════════
 
-/// Middleware axum qui :
+/// Middleware axum **STRICT** : exige une signature Ed25519 valide.
+///
+/// Étapes :
 ///   1. Lit le header `Authorization: InfinitySig <pubkey>:<ts>:<sig>`
 ///   2. Lit le body en bytes (cap MAX_BODY_BYTES)
 ///   3. Vérifie la signature via `AuthService::verify_request`
@@ -91,6 +93,77 @@ pub async fn auth_middleware(
     })?;
 
     // Reconstruit le request avec le body conservé pour les handlers.
+    let new_request = Request::from_parts(parts, Body::from(body_bytes));
+    Ok(next.run(new_request).await)
+}
+
+/// Middleware axum **COMPAT** : migration douce vers la signature Ed25519.
+///
+/// Comportement à 3 niveaux :
+///
+///   - **Pas de header Authorization** → pass-through avec un `tracing::warn!`
+///     marquant la déprécation. Permet aux versions PWA actuelles
+///     (avant Phase 2.G) de continuer à fonctionner sans casse.
+///   - **Header présent mais malformé / signature invalide / device non
+///     appairé** → **401 strict**. Si quelqu'un essaye de signer mais
+///     foire, on refuse — ne pas masquer un bug d'auth en silence.
+///   - **Header présent et valide** → pass-through normal, le device est
+///     loggé en info (audit trail).
+///
+/// Cible : `/api/pin*`, `/api/policy`, `/api/stream` — routes legacy
+/// du protocole companion qui mutent l'état (pinning, BW). Quand toutes
+/// les versions PWA déployées signeront, on basculera ces routes sur
+/// `auth_middleware` strict (changer une ligne dans `serve_http`).
+///
+/// **PAS pour `/api/handshake` ni `/healthz`** — ces routes restent
+/// 100% publiques (métriques agrégées, anti-DoS via rate limit futur).
+pub async fn auth_compat_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let auth = state.auth.clone();
+    let (parts, body) = request.into_parts();
+
+    let path = parts.uri.path().to_string();
+    let method = parts.method.clone();
+    let header_value_opt = parts
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(std::string::ToString::to_string);
+
+    let body_bytes = to_bytes(body, MAX_BODY_BYTES)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+
+    if let Some(header_value) = header_value_opt {
+        // Header présent → on EXIGE qu'il soit valide. Pas de fallback
+        // silencieux : un client qui sait signer doit le faire correctement.
+        let sig_header = SignatureHeader::parse(&header_value).map_err(|e| {
+            warn!("auth-compat {} {}: malformed header: {}", method, path, e);
+            StatusCode::UNAUTHORIZED
+        })?;
+        let device = auth.verify_request(&sig_header, &body_bytes).map_err(|e| {
+            warn!("auth-compat {} {}: verify failed: {}", method, path, e);
+            StatusCode::UNAUTHORIZED
+        })?;
+        tracing::info!(
+            device = %device.label,
+            "auth-compat {} {}: signed request OK",
+            method, path,
+        );
+    } else {
+        // Pas de header → migration : on log + on laisse passer.
+        // Quand toutes les PWAs déployées auront migré, on bascule
+        // ces routes sur `auth_middleware` strict.
+        warn!(
+            "auth-compat {} {}: UNSIGNED request (deprecated, migrate to \
+             InfinitySig auth before companion v0.3)",
+            method, path,
+        );
+    }
+
     let new_request = Request::from_parts(parts, Body::from(body_bytes));
     Ok(next.run(new_request).await)
 }

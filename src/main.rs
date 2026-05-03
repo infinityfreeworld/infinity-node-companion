@@ -342,6 +342,24 @@ async fn serve_http(state: AppState) {
             api::auth_middleware,
         ));
 
+    // Phase 2.E — sous-router COMPAT pour les routes legacy qui mutent
+    // l'état (pinning, policy, stream WS). Migration douce :
+    //   - non signé → pass-through + WARN log déprécation
+    //   - signé valide → OK + audit info (device label)
+    //   - signé invalide → 401 strict (anti silent-bypass)
+    // Bascule future vers `auth_middleware` strict quand toutes les
+    // PWAs déployées auront migré (Phase 2.G complétée).
+    let legacy_compat = Router::new()
+        .route("/api/stream",     get(stream::ws_handler))
+        .route("/api/pin",        post(post_pin))
+        .route("/api/pin/:cid",   delete(delete_pin))
+        .route("/api/pins",       get(get_pins))
+        .route("/api/policy",     get(get_policy).put(put_policy))
+        .layer(axum_middleware::from_fn_with_state(
+            state.clone(),
+            api::auth_compat_middleware,
+        ));
+
     // Phase 2.F — sous-router pour les routes PUBLIQUES de pairing.
     // Pas d'auth ici car c'est l'établissement initial de la confiance.
     // Le `pair/complete` est protégé par le pairing token (généré via
@@ -351,16 +369,13 @@ async fn serve_http(state: AppState) {
         .route("/pair/companion-pubkey", get(api::get_companion_pubkey));
 
     let app = Router::new()
-        // Routes existantes (publiques pour rétrocompat — handshake n'expose
-        // pas d'info sensible, juste des metrics agrégées).
+        // Routes 100 % publiques — métriques agrégées non sensibles
+        // (pas d'auth requise pour le service-discovery côté PWA).
         .route("/api/handshake",   get(handshake))
-        .route("/api/stream",      get(stream::ws_handler))
-        .route("/api/pin",         post(post_pin))
-        .route("/api/pin/:cid",    delete(delete_pin))
-        .route("/api/pins",        get(get_pins))
-        .route("/api/policy",      get(get_policy).put(put_policy))
         .route("/healthz",         get(healthz))
-        // Phase 2.F — montage des nouveaux sous-routers.
+        // Phase 2.E — sous-router compat (warn si non signé)
+        .merge(legacy_compat)
+        // Phase 2.F — sous-routers pairing (public) et protected (strict)
         .merge(pairing)
         .merge(protected)
         .with_state(state)
