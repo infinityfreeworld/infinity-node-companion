@@ -4,6 +4,7 @@ version     = "0.1.0"
 edition     = "2021"
 description = "Companion natif d'Infinity — Tier 1 du Cœur du Cube. Expose un endpoint de découverte sur 127.0.0.1:7474 que la PWA détecte automatiquement."
 license     = "AGPL-3.0-or-later"
+authors     = ["Infinity Free World"]
 
 [[bin]]
 name = "infinity-node"
@@ -72,7 +73,7 @@ un nœud IPFS (kubo) et un relai NOSTR (nostr-rs-relay) en local sur
 ta machine, contrôlables depuis une icône dans la barre système. La
 PWA Infinity le détecte automatiquement sur 127.0.0.1:7474.
 """
-category     = "Network"
+category     = "Utility"
 copyright    = "Copyright © Infinity contributors"
 osx_minimum_system_version = "11.0"
 # Note : icon = ["icon.png"] — à fournir avant le 1er release.
