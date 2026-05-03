@@ -73,6 +73,7 @@ mod bandwidth;
 mod kubo;
 mod nostr_relay;
 mod pinning;
+mod relay_api;
 mod security;
 mod stream;
 mod supervisor;
@@ -82,7 +83,7 @@ use infinity_auth::AuthService;
 use infinity_identity::Identity;
 use infinity_vault::Vault;
 use kubo::{KuboBackend, KuboMetrics};
-use nostr_relay::NostrRelayBackend;
+use nostr_relay::{NostrRelayBackend, NostrRelayConfig};
 use pinning::{KuboPinClient, PinPolicy, PinRecord, PinTracker};
 
 // ── Constantes ───────────────────────────────────────────────────────────
@@ -112,6 +113,11 @@ pub struct AppState {
     pub vault:         Arc<Vault>,
     pub identity:      Arc<Identity>,
     pub auth:          Arc<AuthService>,
+    // Phase 3.A — owner_pubkey du relai NOSTR appliquée AU DÉMARRAGE.
+    // Sert à détecter si la PWA pousse une nouvelle valeur via
+    // POST /relay/private/owner → on log un warning "redémarrer".
+    // None si jamais set au boot.
+    pub nostr_relay_owner: Option<String>,
 }
 
 // ── Contrat handshake ────────────────────────────────────────────────────
@@ -337,6 +343,12 @@ async fn serve_http(state: AppState) {
                put(api::vault_put)
                  .get(api::vault_get)
                  .delete(api::vault_delete))
+        // Phase 3.A — gestion de la owner_pubkey du relai privé
+        // (set/get protégé par signature ; l'info publique reste accessible
+        // sans auth via /relay/private/info plus bas).
+        .route("/relay/private/owner",
+               get(relay_api::get_owner_pubkey)
+                 .post(relay_api::set_owner_pubkey))
         .layer(axum_middleware::from_fn_with_state(
             state.clone(),
             api::auth_middleware,
@@ -368,6 +380,12 @@ async fn serve_http(state: AppState) {
         .route("/pair/complete",        post(api::pair_complete))
         .route("/pair/companion-pubkey", get(api::get_companion_pubkey));
 
+    // Phase 3.A — info publique du relai privé : URL + owner_pubkey
+    // appliquée + capabilities. Sans auth car c'est de la discovery —
+    // l'écriture de la owner reste protégée plus haut.
+    let private_relay_public = Router::new()
+        .route("/relay/private/info", get(relay_api::get_private_relay_info));
+
     let app = Router::new()
         // Routes 100 % publiques — métriques agrégées non sensibles
         // (pas d'auth requise pour le service-discovery côté PWA).
@@ -378,6 +396,8 @@ async fn serve_http(state: AppState) {
         // Phase 2.F — sous-routers pairing (public) et protected (strict)
         .merge(pairing)
         .merge(protected)
+        // Phase 3.A — info publique du relai privé (discovery)
+        .merge(private_relay_public)
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
@@ -420,21 +440,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(DEFAULT_BW_CAP_MB);
     let bandwidth = BandwidthTracker::new(cap_mb * 1024 * 1024);
 
-    // 3. Backends — try_start retourne None si binaire absent
-    let kubo  = KuboBackend::try_start(rt.handle(), bandwidth.clone());
-    let nostr = NostrRelayBackend::try_start();
-
-    let kubo_status  = if kubo.is_some()  { "✓" } else { "✗ (ipfs absent)" };
-    let nostr_status = if nostr.is_some() { "✓" } else { "✗ (nostr-rs-relay absent)" };
-
-    // 4. Pin tracker + janitor (charge l'état persisté)
-    let pins       = PinTracker::load();
-    let pin_client = kubo.as_ref().map(|k| k.pin_client());
-    pinning::spawn_janitor(rt.handle(), pins.clone(), pin_client.clone());
-
-    // 5. Phase 2.F — security stack : vault chiffré + identité Ed25519 +
-    // auth bridge. Boot fail si Keychain OS indispo (Linux sans
-    // gnome-keyring) — on log un message exploitable et on exit.
+    // 3. Phase 2.F + 3.A — security stack EN PREMIER pour que le relai
+    // NOSTR puisse lire la owner_pubkey du Bâtisseur dans le vault au
+    // démarrage (whitelist write, mode privé).
+    // Boot fail si Keychain OS indispo (Linux sans gnome-keyring) —
+    // message exploitable + exit 1.
     let security = match security::init() {
         Ok(s) => s,
         Err(e) => {
@@ -449,19 +459,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "security stack ready",
     );
 
-    // 6. État partagé (capture les Arc/Strings des backends + security)
+    // 4. Phase 3.A — owner_pubkey du Bâtisseur (lue du vault chiffré).
+    // Si présente → relai privé en mode whitelist (seul le Bâtisseur
+    // peut écrire). Si None → relai en mode local ouvert (la PWA
+    // poussera la pubkey via POST /relay/private/owner au 1ᵉʳ run).
+    let nostr_relay_owner = relay_api::read_owner_pubkey_from_vault(&security.vault);
+    if let Some(pk) = nostr_relay_owner.as_deref() {
+        info!("nostr relay owner_pubkey={pk} (mode privé)");
+    } else {
+        info!("nostr relay sans owner_pubkey (mode local ouvert — PWA pousseur la valeur au pairing)");
+    }
+
+    // 5. Backends — try_start retourne None si binaire absent
+    let kubo  = KuboBackend::try_start(rt.handle(), bandwidth.clone());
+    let nostr = NostrRelayBackend::try_start_with_config(NostrRelayConfig {
+        owner_pubkey: nostr_relay_owner.clone(),
+    });
+
+    let kubo_status  = if kubo.is_some()  { "✓" } else { "✗ (ipfs absent)" };
+    let nostr_status = if nostr.is_some() { "✓" } else { "✗ (nostr-rs-relay absent)" };
+
+    // 6. Pin tracker + janitor (charge l'état persisté)
+    let pins       = PinTracker::load();
+    let pin_client = kubo.as_ref().map(|k| k.pin_client());
+    pinning::spawn_janitor(rt.handle(), pins.clone(), pin_client.clone());
+
+    // 7. État partagé (capture les Arc/Strings des backends + security)
     let state = AppState {
-        started_at:    Arc::new(Instant::now()),
-        enabled:       Arc::new(AtomicBool::new(true)),
-        kubo_metrics:  kubo.as_ref().map(|k| k.metrics.clone()),
-        kubo_gateway:  kubo.as_ref().map(|k| k.gateway.clone()),
-        nostr_url:     nostr.as_ref().map(|n| n.url.clone()),
-        bandwidth:     bandwidth.clone(),
-        pins:          pins.clone(),
+        started_at:        Arc::new(Instant::now()),
+        enabled:           Arc::new(AtomicBool::new(true)),
+        kubo_metrics:      kubo.as_ref().map(|k| k.metrics.clone()),
+        kubo_gateway:      kubo.as_ref().map(|k| k.gateway.clone()),
+        nostr_url:         nostr.as_ref().map(|n| n.url.clone()),
+        bandwidth:         bandwidth.clone(),
+        pins:              pins.clone(),
         pin_client,
-        vault:         security.vault.clone(),
-        identity:      security.identity.clone(),
-        auth:          security.auth.clone(),
+        vault:             security.vault.clone(),
+        identity:          security.identity.clone(),
+        auth:              security.auth.clone(),
+        nostr_relay_owner: nostr.as_ref().and_then(|n| n.applied_owner_pubkey.clone()),
     };
 
     // 6. HTTP server task
