@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────
+# infinity-auth — pont d'authentification PWA ↔ Companion
+#
+# Sans auth, n'importe quel JS sur n'importe quel onglet pourrait
+# parler à `127.0.0.1:7474` et accéder au vault chiffré, demander des
+# signatures, lire les peers IPFS, etc. C'est un trou de sécurité
+# critique inhérent au modèle PWA + service local.
+#
+# Solution : pairing initial OUT-OF-BAND + tokens de session signés.
+#
+# ## Pairing initial (1 fois)
+#
+#   1. PWA → POST /pair/request          → Companion génère un token aléatoire
+#                                          de 32 bytes, l'affiche dans le tray
+#                                          (popup natif que seul l'utilisateur
+#                                          assis devant la machine peut voir).
+#   2. User copie le token dans la PWA   → preuve out-of-band qu'il contrôle
+#                                          le browser ET le tray.
+#   3. PWA → POST /pair/complete         → envoie le token + sa device pubkey
+#                                          Ed25519 (générée + persistée dans
+#                                          IndexedDB côté browser).
+#   4. Companion vérifie le token        → consume one-shot, persiste la device
+#                                          pubkey dans vault namespace "auth".
+#   5. Companion répond                  → companion pubkey hex + ack.
+#
+# ## Sessions futures
+#
+#   - Chaque requête HTTP/WS doit inclure un header :
+#       Authorization: InfinitySig <pubkey>:<ts>:<sig>
+#   - Le serveur vérifie :
+#       a) pubkey est dans la liste des paired devices
+#       b) timestamp est récent (≤ 60s d'écart, anti-replay basique)
+#       c) signature valide sur le message canonique
+#   - Le message signé inclut le hash du body (anti-tampering du payload).
+#
+# Cf. lib.rs pour la spec complète du format.
+# ─────────────────────────────────────────────────────────────────────────
+[package]
+name        = "infinity-auth"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+description = "Pont d'authentification PWA ↔ Companion — pairing out-of-band + signatures Ed25519 par session"
+
+[lib]
+name = "infinity_auth"
+path = "src/lib.rs"
+
+[dependencies]
+# Crates internes du workspace
+infinity-vault      = { path = "../vault" }
+infinity-identity   = { path = "../identity" }
+
+# Génération aléatoire (pairing tokens)
+rand                = "0.8"
+
+# Hash du body (SHA-256) pour anti-tampering du payload
+sha2                = "0.10"
+
+# Encode/decode hex (pubkey, signature, body hash)
+hex                 = "0.4"
+
+# Serialization & errors
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+thiserror           = { workspace = true }
+tracing             = { workspace = true }
+
+# Comparaisons constant-time pour token check (anti timing leak)
+subtle              = "2.5"
+
+[dev-dependencies]
+tempfile            = "3"
+secrecy             = { version = "0.8" }

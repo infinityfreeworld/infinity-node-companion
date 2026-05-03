@@ -9,13 +9,24 @@
 //! PRIMARY KEY composite. Pas de DDL dynamique → migrations stables.
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
 
 use crate::{crypto::DerivedKey, VaultError};
 
+/// Wrapper Send+Sync sur la connexion SQLCipher.
+///
+/// `rusqlite::Connection` est `Send` mais PAS `Sync` par défaut
+/// (SQLite est thread-safe au niveau lib mais une Connection peut
+/// recevoir au plus 1 statement à la fois). Le `Mutex` sérialise
+/// les accès — coût négligeable en pratique car SQLite est rapide
+/// et le vault sert peu de requêtes concurrentes (PWA single-user).
+///
+/// Indispensable pour partager le vault dans `Arc<Vault>` entre
+/// threads HTTP du companion (`AuthService`, futurs handlers, etc).
 pub(crate) struct Store {
-    conn: Connection,
+    conn: Mutex<Connection>,
 }
 
 impl Store {
@@ -44,7 +55,7 @@ impl Store {
         let res: Result<i64, rusqlite::Error> =
             conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0));
         match res {
-            Ok(_) => Ok(Self { conn }),
+            Ok(_) => Ok(Self { conn: Mutex::new(conn) }),
             Err(rusqlite::Error::SqliteFailure(e, _)) => {
                 // SQLCipher renvoie SQLITE_NOTADB (26) pour clé fausse
                 // sur un fichier existant. Pour un fichier neuf vide,
@@ -59,9 +70,17 @@ impl Store {
         }
     }
 
+    /// Acquiert le lock interne. Erreur si poisoned (panic d'un thread
+    /// au milieu d'une op vault — situation grave, on propage).
+    fn conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, VaultError> {
+        self.conn
+            .lock()
+            .map_err(|_| VaultError::Sql(rusqlite::Error::InvalidQuery))
+    }
+
     /// Crée le schéma v1 si la base est vide. Idempotent.
     pub fn init_schema(&self) -> Result<(), VaultError> {
-        self.conn.execute_batch(
+        self.conn()?.execute_batch(
             r"
             CREATE TABLE IF NOT EXISTS kv (
               namespace  TEXT NOT NULL,
@@ -79,7 +98,7 @@ impl Store {
 
     /// INSERT or UPDATE (UPSERT) atomique sur (namespace, key).
     pub fn put(&self, ns: &str, key: &str, value: &[u8]) -> Result<(), VaultError> {
-        self.conn.execute(
+        self.conn()?.execute(
             "INSERT INTO kv (namespace, key, value, updated_at)
              VALUES (?1, ?2, ?3, strftime('%s','now'))
              ON CONFLICT (namespace, key) DO UPDATE
@@ -92,7 +111,7 @@ impl Store {
 
     /// Lecture clé. None si absente.
     pub fn get(&self, ns: &str, key: &str) -> Result<Option<Vec<u8>>, VaultError> {
-        match self.conn.query_row(
+        match self.conn()?.query_row(
             "SELECT value FROM kv WHERE namespace = ?1 AND key = ?2",
             params![ns, key],
             |row| row.get::<_, Vec<u8>>(0),
@@ -106,9 +125,8 @@ impl Store {
     /// Liste les clés d'un namespace, triées (ORDER BY pour résultats
     /// déterministes — utile pour les tests et l'audit).
     pub fn list(&self, ns: &str) -> Result<Vec<String>, VaultError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key FROM kv WHERE namespace = ?1 ORDER BY key")?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT key FROM kv WHERE namespace = ?1 ORDER BY key")?;
         let rows = stmt.query_map(params![ns], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -119,7 +137,7 @@ impl Store {
 
     /// Compte les clés d'un namespace (sans charger les valeurs).
     pub fn count_ns(&self, ns: &str) -> Result<usize, VaultError> {
-        let n: i64 = self.conn.query_row(
+        let n: i64 = self.conn()?.query_row(
             "SELECT count(*) FROM kv WHERE namespace = ?1",
             params![ns],
             |r| r.get(0),
@@ -129,7 +147,7 @@ impl Store {
 
     /// Supprime une clé. Idempotent (pas d'erreur si absente).
     pub fn delete(&self, ns: &str, key: &str) -> Result<(), VaultError> {
-        self.conn
+        self.conn()?
             .execute("DELETE FROM kv WHERE namespace = ?1 AND key = ?2", params![ns, key])?;
         Ok(())
     }
@@ -137,16 +155,15 @@ impl Store {
     /// Vide tout un namespace. Renvoie le nombre de lignes supprimées.
     pub fn clear_ns(&self, ns: &str) -> Result<usize, VaultError> {
         let n = self
-            .conn
+            .conn()?
             .execute("DELETE FROM kv WHERE namespace = ?1", params![ns])?;
         Ok(n)
     }
 
     /// Liste les namespaces avec ≥ 1 clé.
     pub fn list_namespaces(&self) -> Result<Vec<String>, VaultError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT namespace FROM kv ORDER BY namespace")?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT DISTINCT namespace FROM kv ORDER BY namespace")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for r in rows {
@@ -159,7 +176,7 @@ impl Store {
     /// ça atomiquement (en interne via VACUUM-like). Si fail → la base
     /// reste sur l'ancienne clé.
     pub fn rekey(&self, new_key: &DerivedKey) -> Result<(), VaultError> {
-        self.conn
+        self.conn()?
             .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", new_key.to_hex()))?;
         Ok(())
     }
