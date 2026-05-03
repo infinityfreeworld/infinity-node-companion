@@ -1,10 +1,41 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Cargo workspace — Phase 2 (vault chiffré + identité OS + auth bridge)
+#
+# Le crate binaire `infinity-node` reste à la racine pour ne pas casser
+# les imports/CI existants. Les nouveaux crates (vault, identity, auth)
+# vivent dans `crates/` et sont importés par le binaire au fil de l'eau.
+#
+# Cette structure permet :
+#   - tests unitaires isolés par crate (ex. `cargo test -p infinity-vault`)
+#   - audit indépendant de la crypto (vault) sans toucher au reste
+#   - réutilisation potentielle (un autre projet pourrait dépendre du
+#     crate vault sans tirer tout le binaire tray)
+# ─────────────────────────────────────────────────────────────────────────
+[workspace]
+members  = [".", "crates/*"]
+resolver = "2"
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+license    = "AGPL-3.0-or-later"
+authors    = ["Infinity Free World"]
+repository = "https://github.com/infinityfreeworld/infinity-node-companion"
+
+[workspace.dependencies]
+# Dépendances partagées entre crates (versions alignées une fois pour toutes)
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+thiserror   = "1"
+tracing     = "0.1"
+
 [package]
 name        = "infinity-node"
-version     = "0.1.0"
-edition     = "2021"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
 description = "Companion natif d'Infinity — Tier 1 du Cœur du Cube. Expose un endpoint de découverte sur 127.0.0.1:7474 que la PWA détecte automatiquement."
-license     = "AGPL-3.0-or-later"
-authors     = ["Infinity Free World"]
 
 [[bin]]
 name = "infinity-node"

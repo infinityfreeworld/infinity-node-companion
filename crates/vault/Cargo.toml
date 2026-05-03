@@ -1,0 +1,81 @@
+# ─────────────────────────────────────────────────────────────────────────
+# infinity-vault — coffre-fort chiffré local
+#
+# Stocke les données utilisateur (CIDs pinés, métadonnées, secrets app)
+# dans une base SQLite chiffrée. Pierre angulaire du Tier 1 — sans
+# vault, l'identité Ed25519 n'a pas où vivre, l'auth bridge n'a rien
+# à protéger, etc.
+#
+# ## Stack crypto choisie
+#
+#   - **Argon2id** (RFC 9106) : KDF memory-hard pour dériver la clé
+#     32 bytes depuis la passphrase. Paramètres OWASP 2024 :
+#     memory_cost=64MiB, time_cost=3 iter, parallelism=4.
+#
+#   - **XChaCha20-Poly1305** : AEAD pour les données. Choisi vs AES-GCM
+#     pour : nonce 192-bit (résistant nonce reuse accidentel), pas de
+#     dépendance HW, perf constante temps. Implémentation RustCrypto
+#     audité (audit Cure53 2020).
+#
+#   - **SQLCipher** (via rusqlite + feature `bundled-sqlcipher-vendored-openssl`) :
+#     base de données chiffrée (page-level AES-256-CBC + HMAC-SHA512
+#     côté SQLCipher 4). On lui passe la clé Argon2id-derived comme
+#     raw key (PRAGMA key = "x'...'"). Permet les requêtes SQL sans
+#     déchiffrer toute la DB en RAM.
+#
+# ## Pourquoi pas seulement SQLCipher ?
+#
+# SQLCipher utilise PBKDF2 par défaut pour dériver sa clé depuis une
+# passphrase. PBKDF2 est facilement parallélisable sur GPU. Argon2id
+# est memory-hard → un attaquant doit allouer 64MiB par tentative,
+# rend les attaques massives 1000x plus chères.
+#
+# On garde donc : Argon2id en JS-land (KDF user-controlled params)
+# puis on alimente SQLCipher avec la raw key résultante.
+# ─────────────────────────────────────────────────────────────────────────
+[package]
+name        = "infinity-vault"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+description = "Coffre-fort chiffré local pour Infinity Node — XChaCha20-Poly1305 + Argon2id + SQLCipher"
+
+[lib]
+name = "infinity_vault"
+path = "src/lib.rs"
+
+[dependencies]
+# ── Crypto core ──────────────────────────────────────────────────────
+# argon2 = RustCrypto, audit OK 2021. Feature `std` pour les params.
+argon2              = { version = "0.5", default-features = false, features = ["std", "alloc"] }
+# chacha20poly1305 = RustCrypto, audit Cure53 2020. Feature `xchacha20poly1305` pour le nonce 192-bit.
+chacha20poly1305    = { version = "0.10", features = ["std"] }
+# zeroize = wipe mémoire après usage des secrets (best practice crypto)
+zeroize             = { version = "1.7", features = ["derive"] }
+# secrecy = type-system guard pour éviter de logger / serialiser des secrets par accident
+secrecy             = { version = "0.8", features = ["serde"] }
+# rand = pour les sels Argon2 + nonces XChaCha20 (OsRng en source)
+rand                = "0.8"
+# subtle = comparaisons constant-time (anti timing attacks)
+subtle              = "2.5"
+# hex = encode/decode du salt + clé pour PRAGMA SQLCipher (raw key mode)
+hex                 = "0.4"
+
+# ── Stockage ─────────────────────────────────────────────────────────
+# rusqlite avec sqlcipher embedded (vendored = pas besoin d'OpenSSL système).
+# La feature bundled-sqlcipher-vendored-openssl downloade et build SQLCipher
+# au cargo build → 1 seul binaire final, zéro dépendance dynamique.
+rusqlite            = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+# ── Serialization & errors ──────────────────────────────────────────
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+thiserror           = { workspace = true }
+tracing             = { workspace = true }
+
+[dev-dependencies]
+# tempfile = isolation des fichiers vault entre tests
+tempfile            = "3"
+# proptest = property-based testing pour fuzzer les API publiques
+proptest            = "1.4"
