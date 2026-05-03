@@ -1,0 +1,197 @@
+# =============================================================================
+# Infinity Node Companion — Release pipeline
+#
+# Build automatique des installeurs natifs pour les 3 OS dès qu'un tag
+# `v*.*.*` est pushé sur la branche principale.
+#
+# Artefacts produits :
+#   - macOS : Infinity-Node-{tag}-mac.dmg          (universal arm64+x86_64)
+#   - Windows : Infinity-Node-{tag}-win.msi
+#   - Linux : Infinity-Node-{tag}-linux.AppImage
+#
+# Tous attachés au GitHub Release créé automatiquement.
+# Total durée : ~10-15 minutes (parallèle sur les 3 jobs).
+#
+# Pour déclencher manuellement le 1er release :
+#   git tag v0.1.0 && git push --tags
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── 1. macOS — universal binary + .dmg ──────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --locked
+
+      - name: Build universal binary
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/infinity-node \
+            target/aarch64-apple-darwin/release/infinity-node \
+            -output target/universal-apple-darwin/release/infinity-node
+
+      - name: Bundle .app
+        run: |
+          cargo bundle --release
+          BUNDLE_PATH=$(find target/release/bundle/osx -name "*.app" -type d | head -1)
+          cp target/universal-apple-darwin/release/infinity-node "$BUNDLE_PATH/Contents/MacOS/infinity-node"
+
+      - name: Create .dmg
+        run: |
+          BUNDLE_PATH=$(find target/release/bundle/osx -name "*.app" -type d | head -1)
+          DMG_NAME="Infinity-Node-${{ github.ref_name }}-mac.dmg"
+          hdiutil create -volname "Infinity Node" \
+            -srcfolder "$BUNDLE_PATH" \
+            -ov -format UDZO \
+            "$DMG_NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: Infinity-Node-${{ github.ref_name }}-mac.dmg
+
+  # ── 2. Windows — .msi installer ─────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Initialize WiX
+        run: |
+          if (!(Test-Path "wix/main.wxs")) {
+            cargo wix init --force
+          }
+
+      - name: Build .msi
+        run: cargo wix --no-build --nocapture
+
+      - name: Rename + move artifact
+        shell: bash
+        run: |
+          MSI=$(find target/wix -name "*.msi" | head -1)
+          mv "$MSI" "Infinity-Node-${{ github.ref_name }}-win.msi"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: Infinity-Node-${{ github.ref_name }}-win.msi
+
+  # ── 3. Linux — AppImage portable ────────────────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GTK + tray deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+            libssl-dev fuse imagemagick
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Download appimagetool
+        run: |
+          wget -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Assemble AppDir
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp target/release/infinity-node AppDir/usr/bin/
+          cat > AppDir/infinity-node.desktop <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Infinity Node
+          Exec=infinity-node
+          Icon=infinity-node
+          Categories=Network;
+          Terminal=false
+          EOF
+          convert -size 256x256 xc:transparent AppDir/infinity-node.png
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "$HERE/usr/bin/infinity-node" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+      - name: Build AppImage
+        run: |
+          ./appimagetool --appimage-extract-and-run AppDir Infinity-Node-${{ github.ref_name }}-linux.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: Infinity-Node-${{ github.ref_name }}-linux.AppImage
+
+  # ── 4. Crée le GitHub Release et y attache les 3 artefacts ──────────
+  release:
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/macos-dmg/*.dmg
+            artifacts/windows-msi/*.msi
+            artifacts/linux-appimage/*.AppImage
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## Téléchargements
+
+            - **macOS** : `Infinity-Node-${{ github.ref_name }}-mac.dmg`
+              - Double-clique le .dmg, glisse l'icône vers Applications
+              - 1ʳᵉ ouverture : clic droit sur l'app → **Ouvrir** (bypass Gatekeeper)
+
+            - **Windows** : `Infinity-Node-${{ github.ref_name }}-win.msi`
+              - Double-clic le .msi → wizard d'installation
+              - 1ʳᵉ exécution : SmartScreen → **Plus d'infos** → **Exécuter quand même**
+
+            - **Linux** : `Infinity-Node-${{ github.ref_name }}-linux.AppImage`
+              - `chmod +x` puis double-clic, ou `./Infinity-Node-*.AppImage`
+              - Aucun warning sur la plupart des distros
