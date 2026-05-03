@@ -1,0 +1,68 @@
+# ─────────────────────────────────────────────────────────────────────────
+# infinity-identity — identité Ed25519 souveraine du Bâtisseur
+#
+# Stockage HYBRIDE :
+#   - Clé PRIVÉE (32-byte seed) → Keychain OS via crate `keyring`
+#     (Apple Keychain / Windows Credential Manager / Linux Secret Service).
+#     L'OS gère le déverrouillage (Touch ID / Hello / mdp utilisateur)
+#     et l'isolation par-app. La clé ne quitte JAMAIS le secret store
+#     en clair sauf au moment de signer (et est wipe immédiatement).
+#
+#   - Clé PUBLIQUE + metadata (nom, créé_le, last_used_at) → vault chiffré
+#     (crate `infinity-vault`, namespace "identity"). Permet de retrouver
+#     l'identité même hors-ligne (offline pubkey check, restore).
+#
+# Pourquoi ce split ?
+#
+#   1. Le Keychain OS apporte une couche de protection RAM-level
+#      (l'OS peut imposer Touch ID avant de relâcher la clé).
+#   2. Le vault chiffré apporte la portabilité (backup, sync) — la
+#      pubkey peut voyager avec le vault, pas le secret.
+#   3. Si l'OS Keychain est inaccessible (perte de session, autre user),
+#      on peut quand même savoir QUI on est (pubkey via vault) sans
+#      pouvoir signer (=> dégradation propre).
+#
+# Auth bridge PWA (Phase 2.D) consommera ce crate pour :
+#   - challenge-response : la PWA envoie un challenge, on signe, elle vérifie
+#   - identification : la PWA récupère la pubkey pour la display
+# ─────────────────────────────────────────────────────────────────────────
+[package]
+name        = "infinity-identity"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+description = "Identité Ed25519 souveraine pour Infinity Node — clé privée en Keychain OS, pubkey + metadata en vault chiffré"
+
+[lib]
+name = "infinity_identity"
+path = "src/lib.rs"
+
+[dependencies]
+# ── Crypto ───────────────────────────────────────────────────────────
+# ed25519-dalek = RustCrypto, audit OK, signatures déterministes RFC 8032.
+# Feature `rand_core` pour la génération de clé via OsRng.
+ed25519-dalek       = { version = "2", default-features = false, features = ["std", "rand_core", "zeroize"] }
+rand                = "0.8"
+zeroize             = { version = "1.7", features = ["derive"] }
+secrecy             = { version = "0.8", features = ["serde"] }
+hex                 = "0.4"   # encode/decode pubkey + signature
+
+# ── Keychain OS ──────────────────────────────────────────────────────
+# keyring 3 = abstraction cross-platform (macOS Keychain, Windows
+# Credential Manager, Linux Secret Service via D-Bus).
+# Linux : nécessite gnome-keyring ou KWallet en runtime — fallback
+# géré par le crate (renvoie une erreur explicite si rien n'est dispo).
+keyring             = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+
+# ── Vault (dépendance interne workspace) ─────────────────────────────
+infinity-vault      = { path = "../vault" }
+
+# ── Serialization & errors ──────────────────────────────────────────
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+thiserror           = { workspace = true }
+tracing             = { workspace = true }
+
+[dev-dependencies]
+tempfile            = "3"
