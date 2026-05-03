@@ -1,0 +1,224 @@
+# =============================================================================
+# Phase 3.E — Release nostr-rs-relay binaries pour l'auto-installer
+#
+# Cross-compile `nostr-rs-relay` (upstream scsibug/nostr-rs-relay) pour 5
+# cibles natives, calcule SHA-256, publie comme assets sur une release
+# `relay-vX.X.X` du repo companion. Le module `src/relay_installer.rs`
+# télécharge ces binaires au 1ᵉʳ run du companion si pas trouvé sur PATH.
+#
+# ## Workflow trigger
+#
+#   - workflow_dispatch (manuel) : champ `relay_version` à choisir
+#   - push tag `relay-v*.*.*` : tag manuel après validation
+#
+# ## Après le 1ᵉʳ run
+#
+# Récupérer les SHA-256 affichés dans les logs et les injecter dans
+# `src/relay_installer.rs::manifest_for_target()` pour activer
+# l'auto-download (sans hash valide → fallback message d'install manuel).
+# =============================================================================
+
+name: Release nostr-rs-relay binaries
+
+on:
+  push:
+    tags: ['relay-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      relay_version:
+        description: 'Version upstream de nostr-rs-relay à builder (ex. 0.9.1)'
+        required: true
+        default: '0.9.1'
+
+permissions:
+  contents: write   # nécessaire pour créer la release + uploader assets
+
+jobs:
+  # ── 5 jobs de build en parallèle ──────────────────────────────────────
+  build:
+    name: build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false   # on veut tous les artifacts qui buildent même si un fail
+      matrix:
+        include:
+          - label:  macos-aarch64
+            os:     macos-latest
+            target: aarch64-apple-darwin
+            ext:    ''
+            cross:  false
+          - label:  macos-x86_64
+            os:     macos-13       # runner Intel toujours dispo (legacy)
+            target: x86_64-apple-darwin
+            ext:    ''
+            cross:  false
+          - label:  linux-x86_64
+            os:     ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext:    ''
+            cross:  false
+          - label:  linux-aarch64
+            os:     ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            ext:    ''
+            cross:  true
+          - label:  windows-x86_64
+            os:     windows-latest
+            target: x86_64-pc-windows-msvc
+            ext:    .exe
+            cross:  false
+
+    steps:
+      - name: Checkout nostr-rs-relay (upstream)
+        uses: actions/checkout@v4
+        with:
+          repository: scsibug/nostr-rs-relay
+          ref: ${{ inputs.relay_version || github.ref_name }}
+          # Si tag = relay-v0.9.1 on extrait 0.9.1 plus bas
+          path: nostr-rs-relay
+
+      - name: Resolve actual upstream tag
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.relay_version }}" ]; then
+            VERSION="${{ inputs.relay_version }}"
+          else
+            # github.ref_name = "relay-v0.9.1" → on enlève le préfixe
+            VERSION="${GITHUB_REF_NAME#relay-v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building nostr-rs-relay v$VERSION for ${{ matrix.target }}"
+
+      - name: Re-checkout at exact tag (in case ref was a branch)
+        working-directory: nostr-rs-relay
+        shell: bash
+        run: |
+          git fetch --tags
+          git checkout "${{ steps.ver.outputs.version }}" || \
+          git checkout "v${{ steps.ver.outputs.version }}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux aarch64 only)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      # Linux aarch64 : utilise `cross` (Docker QEMU). Plus simple que le
+      # cross-compile manuel (libssl-dev cross, etc.).
+      - name: Build (cross — Linux aarch64)
+        if: matrix.cross == true
+        working-directory: nostr-rs-relay
+        run: cross build --release --target ${{ matrix.target }}
+
+      # Toutes les autres cibles : build natif simple.
+      - name: Build (native)
+        if: matrix.cross == false
+        working-directory: nostr-rs-relay
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage + rename binary
+        shell: bash
+        working-directory: nostr-rs-relay
+        run: |
+          SRC="target/${{ matrix.target }}/release/nostr-rs-relay${{ matrix.ext }}"
+          DEST="../nostr-rs-relay-${{ matrix.label }}${{ matrix.ext }}"
+          ls -la "$SRC"
+          cp "$SRC" "$DEST"
+          # Affiche taille pour info
+          ls -la "$DEST"
+
+      - name: Compute SHA-256
+        shell: bash
+        run: |
+          ASSET="nostr-rs-relay-${{ matrix.label }}${{ matrix.ext }}"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            SHA=$(shasum -a 256 "$ASSET" | awk '{print $1}')
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            SHA=$(sha256sum "$ASSET" | awk '{print $1}')
+          else
+            SHA=$(sha256sum "$ASSET" | awk '{print $1}')
+          fi
+          echo "==========================================="
+          echo "SHA-256 ${{ matrix.label }} : $SHA"
+          echo "==========================================="
+          echo "$SHA  $ASSET" > "${ASSET}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-${{ matrix.label }}
+          path: |
+            nostr-rs-relay-${{ matrix.label }}${{ matrix.ext }}
+            nostr-rs-relay-${{ matrix.label }}${{ matrix.ext }}.sha256
+
+  # ── Release : gather all artifacts + create GitHub Release ──────────
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="relay-v${{ inputs.relay_version }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Aggregate SHA-256 manifest
+        id: manifest
+        shell: bash
+        run: |
+          echo "# SHA-256 sums for ${{ steps.tag.outputs.tag }}" > MANIFEST.txt
+          echo "" >> MANIFEST.txt
+          # On rassemble tous les binaires + leurs hashes pour faciliter
+          # la mise à jour de relay_installer.rs côté companion.
+          for f in $(find artifacts -name "nostr-rs-relay-*" ! -name "*.sha256" | sort); do
+            asset=$(basename "$f")
+            sha_file="${f}.sha256"
+            if [ -f "$sha_file" ]; then
+              sha=$(awk '{print $1}' "$sha_file")
+              echo "${sha}  ${asset}" >> MANIFEST.txt
+            fi
+          done
+          echo "Final manifest:"
+          cat MANIFEST.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: nostr-rs-relay ${{ steps.tag.outputs.tag }}
+          files: |
+            artifacts/**/nostr-rs-relay-*
+            MANIFEST.txt
+          generate_release_notes: false
+          body: |
+            Cross-compiled binaries of [scsibug/nostr-rs-relay](https://github.com/scsibug/nostr-rs-relay) for the Infinity Node companion auto-installer (Phase 3.E).
+
+            **À FAIRE après ce release** : copier les hashes SHA-256 ci-dessous (cf. `MANIFEST.txt`) dans `src/relay_installer.rs::manifest_for_target()` du repo companion, puis tag une nouvelle version companion.
+
+            ## Targets
+            - `nostr-rs-relay-macos-aarch64` (Apple Silicon)
+            - `nostr-rs-relay-macos-x86_64` (Intel Mac)
+            - `nostr-rs-relay-linux-x86_64`
+            - `nostr-rs-relay-linux-aarch64`
+            - `nostr-rs-relay-windows-x86_64.exe`
+
+            ## Auto-install
+            Le companion télécharge automatiquement le binaire correspondant à son OS/arch au 1ᵉʳ démarrage si `nostr-rs-relay` n'est pas trouvé sur le PATH.
+          draft: false
+          prerelease: false
