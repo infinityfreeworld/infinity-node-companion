@@ -57,12 +57,20 @@ jobs:
           BUNDLE_PATH=$(find target/release/bundle/osx -name "*.app" -type d | head -1)
           cp target/universal-apple-darwin/release/infinity-node "$BUNDLE_PATH/Contents/MacOS/infinity-node"
 
-      - name: Create .dmg
+      - name: Create .dmg with Applications shortcut
         run: |
           BUNDLE_PATH=$(find target/release/bundle/osx -name "*.app" -type d | head -1)
           DMG_NAME="Infinity-Node-mac.dmg"
+          # Stage un dossier avec l'app + un alias vers /Applications.
+          # L'utilisateur voit alors les 2 icônes côte à côte dans le DMG
+          # et peut faire le drag-and-drop classique pour installer.
+          STAGING="dmg-staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp -R "$BUNDLE_PATH" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
           hdiutil create -volname "Infinity Node" \
-            -srcfolder "$BUNDLE_PATH" \
+            -srcfolder "$STAGING" \
             -ov -format UDZO \
             "$DMG_NAME"
 
