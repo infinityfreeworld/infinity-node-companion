@@ -1,0 +1,85 @@
+[package]
+name        = "infinity-node"
+version     = "0.1.0"
+edition     = "2021"
+description = "Companion natif d'Infinity — Tier 1 du Cœur du Cube. Expose un endpoint de découverte sur 127.0.0.1:7474 que la PWA détecte automatiquement."
+license     = "AGPL-3.0-or-later"
+
+[[bin]]
+name = "infinity-node"
+path = "src/main.rs"
+
+[dependencies]
+tokio       = { version = "1", features = ["full"] }
+axum        = { version = "0.7", features = ["ws"] }
+tower-http  = { version = "0.5", features = ["cors", "trace"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Tray icon — D.1
+# tao = fork de winit par Tauri, gère correctement NSApplication sur macOS
+# tray-icon = lib cross-platform de tray (mac/win/linux), vient du même projet
+# image = encodage PNG runtime (icône générée procéduralement, pas de fichier asset)
+# open = lance l'URL dans le navigateur par défaut
+tao         = "0.30"
+tray-icon   = "0.19"
+image       = { version = "0.25", default-features = false, features = ["png"] }
+open        = "5"
+
+# Auto-launch au boot — D.2
+# Abstrait les 3 plateformes :
+#   macOS  → ~/Library/LaunchAgents/<bundle_id>.plist (RunAtLoad=true)
+#   linux  → ~/.config/autostart/<app>.desktop
+#   win    → HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+auto-launch = "0.5"
+
+# Subprocess management — Phase E
+# reqwest = client HTTP pour interroger l'API kubo (peers, pin ls, bw)
+# which   = trouve les binaires kubo / nostr-rs-relay sur le PATH
+# dirs    = home dir cross-platform (déjà tiré par auto-launch en v4)
+reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+which       = "6"
+dirs        = "5"
+
+[profile.release]
+opt-level = "z"      # taille binaire optimale (objectif < 10 Mo)
+lto       = true
+codegen-units = 1
+strip     = true
+panic     = "abort"
+
+# ── Métadonnées de packaging cross-platform ───────────────────────────
+# Sprint D — installeurs natifs (.dmg / .msi / AppImage) pour zéro
+# friction utilisateur (vs `cargo install`). Utilisés par :
+#   - cargo-bundle  → .app bundle macOS (puis hdiutil → .dmg)
+#   - cargo-wix     → .msi installer Windows
+#   - appimagetool  → .AppImage Linux
+#
+# Tous les outils sont open-source/gratuits. Code signing payant
+# (Apple $99/an, Windows EV $200+/an) NON requis : l'utilisateur
+# verra 1 warning à bypasser la première fois sur Mac et Windows
+# (clic droit → Ouvrir / SmartScreen → Exécuter quand même).
+
+[package.metadata.bundle]
+name        = "Infinity Node"
+identifier  = "com.infinity.node"
+short_description = "Companion natif décentralisé d'Infinity — IPFS + NOSTR"
+long_description  = """
+Infinity Node est le companion natif du Cœur du Cube. Il fait tourner
+un nœud IPFS (kubo) et un relai NOSTR (nostr-rs-relay) en local sur
+ta machine, contrôlables depuis une icône dans la barre système. La
+PWA Infinity le détecte automatiquement sur 127.0.0.1:7474.
+"""
+category     = "Network"
+copyright    = "Copyright © Infinity contributors"
+osx_minimum_system_version = "11.0"
+# Note : icon = ["icon.png"] — à fournir avant le 1er release.
+# Sans icon, cargo-bundle utilise une icône générique.
+
+[package.metadata.wix]
+upgrade-guid    = "B8E4C2A1-3F1D-4A5E-9C2B-D1E6F0A4B7C9"
+path-guid       = "C9F5D3B2-4A2E-5B6F-AD3C-E2F7A1B5C8DA"
+license         = false
+eula            = false
