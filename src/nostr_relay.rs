@@ -36,12 +36,12 @@
 //! `127.0.0.1:7777` par défaut (loopback). Phase 3.B élargira à
 //! `0.0.0.0:7777` ou Tailscale IP pour le multi-device.
 
+use crate::relay_installer;
 use crate::supervisor::ManagedChild;
 use std::{path::PathBuf, process::Command};
 use tracing::{info, warn};
 
-const BIN:  &str = "nostr-rs-relay";
-const PORT: u16  = 7777;
+const PORT: u16 = 7777;
 
 /// Configuration du backend NOSTR-relay au démarrage.
 #[derive(Clone, Debug, Default)]
@@ -67,10 +67,22 @@ impl NostrRelayBackend {
     /// seul le Bâtisseur peut publier. Sinon → relai en mode ouvert
     /// (utile pour le 1ᵉʳ run avant que la PWA ait set la pubkey).
     pub fn try_start_with_config(config: NostrRelayConfig) -> Option<Self> {
-        if which::which(BIN).is_err() {
-            warn!("nostr-rs-relay backend: '{BIN}' introuvable sur PATH — skip");
-            return None;
-        }
+        // Phase 3.E — auto-install si binaire pas trouvé sur PATH ni
+        // dans le dossier de cache local. find_existing() couvre les 2.
+        let bin_path = match relay_installer::find_existing() {
+            Some(p) => p,
+            None => match relay_installer::ensure_installed() {
+                Some(p) => p,
+                None => {
+                    warn!(
+                        "nostr-rs-relay introuvable et auto-install impossible — relai désactivé.\n\
+                         → installe manuellement : `cargo install nostr-rs-relay`\n\
+                           ou récupère un binaire prédbuilt et place-le sur ton PATH."
+                    );
+                    return None;
+                }
+            },
+        };
 
         let dir = data_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -93,7 +105,7 @@ impl NostrRelayBackend {
             config.owner_pubkey.as_deref().unwrap_or("<aucun, mode ouvert>"),
         );
 
-        let mut cmd = Command::new(BIN);
+        let mut cmd = Command::new(&bin_path);
         cmd.args([
             "--config", cfg.to_str().unwrap_or("config.toml"),
             "--db",     dir.to_str().unwrap_or("."),
