@@ -89,11 +89,18 @@ thiserror         = "1"     # SecurityInitError dans security.rs
 
 # Phase 3.E — auto-installer pour nostr-rs-relay (download + verify SHA-256
 # au 1ᵉʳ run si binaire pas trouvé sur PATH). Cf. src/relay_installer.rs.
-sha2              = "0.10"  # SHA-256 verify du download
+sha2              = "0.10"  # SHA-256 verify du download + id event NOSTR (mesh)
 
 # Phase 3-IPFS-A — swarm.key génération (rand) — utilisé par ipfs_private.rs.
 # `rand` est déjà tiré plus haut, on n'a besoin que de tempfile en dev pour
 # les tests d'I/O sur le repo IPFS factice.
+
+# Mesh (P3b) — client NOSTR minimal pour le maillage de stockage. On évite
+# nostr-sdk (API mouvante, lourd) : signature NIP-01 faite main via secp256k1
+# (schnorr) + WebSocket via tokio-tungstenite. Cf. src/mesh.rs.
+secp256k1         = { version = "0.29", features = ["rand-std", "global-context", "hashes"] }
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
+futures-util      = "0.3"
 
 [dev-dependencies]
 tempfile          = "3"     # tests I/O ipfs_private (write/read swarm.key)

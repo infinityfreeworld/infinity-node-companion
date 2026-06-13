@@ -73,6 +73,7 @@ mod bandwidth;
 mod ipfs_api;
 mod ipfs_private;
 mod kubo;
+mod mesh;
 mod nostr_relay;
 mod pinning;
 mod relay_api;
@@ -524,6 +525,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pins       = PinTracker::load();
     let pin_client = kubo.as_ref().map(|k| k.pin_client());
     pinning::spawn_janitor(rt.handle(), pins.clone(), pin_client.clone());
+
+    // 6bis. Maillage de stockage (P3b) — opt-in via INFINITY_MESH=1. Souscrit
+    //       les demandes MESH_MIRROR (→ pin) et publie l'annonce MESH_NODE.
+    if let Some(mesh_cfg) = mesh::MeshConfig::from_env() {
+        rt.handle().spawn(mesh::run(mesh_cfg, pins.clone(), pin_client.clone()));
+        info!("maillage : ✓ (INFINITY_MESH=1)");
+    }
 
     // 7. État partagé (capture les Arc/Strings des backends + security)
     let state = AppState {
