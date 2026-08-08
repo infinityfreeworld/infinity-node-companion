@@ -62,3 +62,138 @@ pub fn enable(auto: &AutoLaunch) -> Result<(), String> {
 pub fn disable(auto: &AutoLaunch) -> Result<(), String> {
     auto.disable().map_err(|e| e.to_string())
 }
+
+// ── Défaut appliqué UNE SEULE FOIS — Phase D.2b ─────────────────────────────
+//
+// ## Le défaut que ceci corrige
+//
+// Bâtisseur, 08/08/2026, devant l'alerte « Carte hors-ligne indisponible » :
+// « le nœud devrait se rendre opérationnel automatiquement, non ? »
+//
+// Il devrait, et il le POUVAIT déjà : tout le mécanisme ci-dessus existe et
+// fonctionne sur les trois systèmes. Mais il est branché sur une CASE À COCHER
+// du menu de la barre système, décochée au premier lancement. Il faut donc
+// savoir qu'elle existe, et aller la chercher. Personne ne le fera — et une
+// capacité que personne n'active n'existe pas.
+//
+// L'application coche donc elle-même, une fois, au premier démarrage.
+//
+// ## ⚠️ « Une fois » est le mot important
+//
+// Réactiver à chaque lancement effacerait un refus délibéré : quelqu'un qui
+// décoche verrait sa décision annulée au démarrage suivant, sans explication.
+// Un marqueur retient donc qu'on a déjà appliqué le défaut, et l'on ne
+// repasse JAMAIS derrière un choix humain.
+//
+// ## ⚠️ Et pas depuis un build de développement
+//
+// `current_exe` rend `target/debug/infinity-node` sous `cargo run`. Enregistrer
+// ce chemin-là poserait un démarrage automatique vers un binaire qui sera
+// effacé au prochain `cargo clean`, ou déplacé avec le dossier de travail — le
+// système relancerait alors dans le vide à chaque session, en silence. La même
+// leçon a déjà été payée côté PWA : ne jamais pointer un service vers un
+// répertoire de travail.
+
+use std::path::{Path, PathBuf};
+
+/// Marqueur : le défaut a déjà été appliqué une fois sur cette machine.
+fn marqueur() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".infinity-node")
+        .join("autostart-defaut-applique")
+}
+
+/// Un binaire lancé depuis l'arbre de compilation — chemin non pérenne.
+///
+/// Volontairement fondé sur `target/debug` ou `target/release`, les deux seuls
+/// emplacements que Cargo produit : un binaire INSTALLÉ n'y vit jamais.
+pub fn est_build_de_dev(exe: &Path) -> bool {
+    let mut composants = exe.components().rev().skip(1); // on saute le nom du binaire
+    matches!(composants.next().map(|c| c.as_os_str().to_string_lossy().into_owned()).as_deref(),
+             Some("debug") | Some("release"))
+        && composants.next().map(|c| c.as_os_str() == "target").unwrap_or(false)
+}
+
+/// Faut-il appliquer le défaut « démarre à l'ouverture de session » ?
+///
+/// PURE : aucune écriture, aucun accès système. C'est la règle seule, et c'est
+/// elle qui mérite d'être éprouvée — le reste n'est que de l'écriture de
+/// fichier.
+pub fn doit_appliquer_defaut(marqueur_present: bool, deja_actif: bool, exe: &Path) -> bool {
+    if marqueur_present { return false }   // un choix a déjà été fait — on n'y touche pas
+    if deja_actif { return false }         // rien à faire, et le marqueur suffira
+    !est_build_de_dev(exe)
+}
+
+/// Applique le défaut au premier démarrage. Idempotent, silencieux en cas
+/// d'échec : un démarrage automatique qu'on ne peut pas poser ne doit jamais
+/// empêcher le nœud de tourner MAINTENANT.
+///
+/// Renvoie `true` si l'auto-démarrage vient d'être activé par cet appel.
+pub fn appliquer_defaut_une_fois(auto: &AutoLaunch) -> bool {
+    let m = marqueur();
+    let exe = match std::env::current_exe() { Ok(p) => p, Err(_) => return false };
+    if !doit_appliquer_defaut(m.exists(), is_enabled(auto), &exe) {
+        // On pose tout de même le marqueur : la décision est prise, une fois.
+        let _ = std::fs::create_dir_all(m.parent().unwrap_or(Path::new(".")));
+        let _ = std::fs::write(&m, b"1");
+        return false
+    }
+    let ok = enable(auto).is_ok();
+    let _ = std::fs::create_dir_all(m.parent().unwrap_or(Path::new(".")));
+    let _ = std::fs::write(&m, b"1");
+    ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn un_binaire_installe_n_est_pas_un_build_de_dev() {
+        assert!(!est_build_de_dev(&PathBuf::from("/Applications/Infinity Node.app/Contents/MacOS/infinity-node")));
+        assert!(!est_build_de_dev(&PathBuf::from("/usr/local/bin/infinity-node")));
+    }
+
+    #[test]
+    fn un_cargo_run_est_reconnu() {
+        // ⚠️ Le cas qui poserait un démarrage automatique vers un chemin
+        // effacé au prochain `cargo clean`.
+        assert!(est_build_de_dev(&PathBuf::from("/Users/x/repo/target/debug/infinity-node")));
+        assert!(est_build_de_dev(&PathBuf::from("/Users/x/repo/target/release/infinity-node")));
+    }
+
+    #[test]
+    fn un_dossier_nomme_debug_ailleurs_ne_trompe_pas() {
+        // « debug » sans « target » juste au-dessus n'est pas un build Cargo.
+        assert!(!est_build_de_dev(&PathBuf::from("/opt/debug/infinity-node")));
+    }
+
+    #[test]
+    fn on_applique_au_tout_premier_demarrage() {
+        let installe = PathBuf::from("/usr/local/bin/infinity-node");
+        assert!(doit_appliquer_defaut(false, false, &installe));
+    }
+
+    #[test]
+    fn on_ne_repasse_jamais_derriere_un_choix_humain() {
+        // ⚠️ LE test de ce lot. Quelqu'un qui décoche verrait sinon sa décision
+        // annulée au démarrage suivant, sans explication.
+        let installe = PathBuf::from("/usr/local/bin/infinity-node");
+        assert!(!doit_appliquer_defaut(true, false, &installe));
+    }
+
+    #[test]
+    fn on_n_active_pas_depuis_les_sources() {
+        let dev = PathBuf::from("/Users/x/repo/target/debug/infinity-node");
+        assert!(!doit_appliquer_defaut(false, false, &dev));
+    }
+
+    #[test]
+    fn rien_a_faire_si_c_est_deja_actif() {
+        let installe = PathBuf::from("/usr/local/bin/infinity-node");
+        assert!(!doit_appliquer_defaut(false, true, &installe));
+    }
+}
