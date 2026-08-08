@@ -561,6 +561,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Auto-launch handle
     let autostart = autostart::handle();
+    // Phase D.2b — le défaut s'applique TOUT SEUL, une seule fois.
+    //
+    // La capacité existait déjà et fonctionnait ; elle attendait qu'on trouve
+    // une case à cocher dans ce menu. Personne ne la trouvait, et le Bâtisseur
+    // voyait « Carte hors-ligne indisponible » sans comprendre pourquoi son
+    // nœud « ne se rend pas opérationnel automatiquement ».
+    //
+    // ⚠️ Lu AVANT `is_enabled` : sinon le menu afficherait l'état d'avant
+    // l'activation, et la case paraîtrait décochée alors qu'elle vient d'être
+    // posée — un témoin qui ment dès la première seconde.
+    if let Some(auto) = autostart.as_ref() {
+        if autostart::appliquer_defaut_une_fois(auto) {
+            info!("autostart activé par défaut au premier démarrage (décochable dans le menu)");
+        }
+    }
     let autostart_initial = autostart.as_ref().map(autostart::is_enabled).unwrap_or(false);
 
     // 6. Tray + menu
