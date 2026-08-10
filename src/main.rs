@@ -37,7 +37,7 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     middleware as axum_middleware,
     response::{IntoResponse, Json},
     routing::{delete, get, post, put},
@@ -80,6 +80,7 @@ mod relay_installer;
 mod security;
 mod stream;
 mod supervisor;
+mod tiles;
 
 use bandwidth::BandwidthTracker;
 use infinity_auth::AuthService;
@@ -176,6 +177,12 @@ async fn handshake(State(state): State<AppState>) -> impl IntoResponse {
     let mut caps = Vec::new();
     if state.kubo_metrics.is_some() { caps.push("ipfs"); }
     if state.nostr_url.is_some()    { caps.push("nostr-relay"); }
+    /* ⚠️ `capabilities` est une liste BLANCHE : la PWA ne tente QUE ce qui y
+       figure. Les 244 Mo d'archives présentes sur le disque n'ont jamais été
+       lues faute de cette seule ligne. Et on n'annonce la capacité que si le
+       dossier contient vraiment quelque chose — l'annoncer à vide ferait
+       basculer la carte sur un fond inexistant, donc noire. */
+    if tiles::has_archives()        { caps.push("tiles"); }
 
     let (peers, pinned, bw) = state.kubo_metrics
         .as_ref()
@@ -340,7 +347,19 @@ async fn serve_http(state: AppState) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        /* ⚠️ Un navigateur ne laisse lire QUE sept en-têtes de réponse en
+           cross-origin ; `Content-Range` et `Accept-Ranges` n'en font pas
+           partie. Notre lecteur PMTiles ne juge aujourd'hui que sur le STATUT
+           (206), qui reste lisible — mais un serveur qui honore les plages et
+           dont personne ne peut le vérifier est exactement le genre de panne
+           qu'on met une journée à comprendre : validée en ligne de commande,
+           inerte dans l'onglet. On les expose. */
+        .expose_headers([
+            header::CONTENT_RANGE,
+            header::ACCEPT_RANGES,
+            header::CONTENT_LENGTH,
+        ]);
 
     // Phase 2.F — sous-router pour les routes PROTÉGÉES par signature.
     // Le middleware `api::auth_middleware` valide le header
@@ -386,6 +405,8 @@ async fn serve_http(state: AppState) {
     // PWAs déployées auront migré (Phase 2.G complétée).
     let legacy_compat = Router::new()
         .route("/api/stream",     get(stream::ws_handler))
+        .route("/api/tiles",      get(tiles::list_tiles))
+        .route("/api/tiles/:nom", get(tiles::get_tile_archive))
         .route("/api/pin",        post(post_pin))
         .route("/api/pin/:cid",   delete(delete_pin))
         .route("/api/pins",       get(get_pins))

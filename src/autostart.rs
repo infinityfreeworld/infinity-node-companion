@@ -7,9 +7,28 @@
 //!
 //! | Plateforme | Mécanisme                                                   |
 //! |------------|-------------------------------------------------------------|
-//! | macOS      | `~/Library/LaunchAgents/com.infinity.node.plist` (LaunchAgent) |
+//! | macOS      | Élément d'ouverture de session (AppleScript) — voir ci-dessous |
 //! | Linux      | `~/.config/autostart/InfinityNode.desktop` (XDG Autostart)  |
 //! | Windows    | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`        |
+//!
+//! ## ⚠️ Sur macOS, ce n'est PAS un LaunchAgent — constaté le 10/08/2026
+//!
+//! Le crate `auto-launch` n'écrit un `~/Library/LaunchAgents/*.plist` que si on
+//! lui demande `set_use_launch_agent(true)`. Sans cet appel — c'est notre cas —
+//! il passe par AppleScript et inscrit un **élément d'ouverture de session**,
+//! visible dans Réglages Système → Général → Ouverture.
+//!
+//! Le README et ce fichier annonçaient le plist. C'est faux, et ça coûte cher :
+//! on cherche un fichier qui n'existera jamais, on en conclut que l'activation
+//! a échoué, alors qu'elle a parfaitement fonctionné.
+//!
+//! **Conséquence réelle, pas seulement documentaire** : un élément d'ouverture
+//! de session lance l'application AU LOGIN, et rien de plus. Il n'a pas de
+//! `KeepAlive` — le plist du crate n'en pose pas davantage. Un nœud qui TOMBE
+//! reste donc tombé jusqu'à la prochaine session. Seul
+//! `scripts/noeud-demarrage-auto.sh` (dépôt PWA) pose un vrai LaunchAgent avec
+//! `KeepAlive`. Ne pas confondre « démarre tout seul » et « se relève tout
+//! seul » : nous n'avons que le premier.
 //!
 //! Tous ces mécanismes sont **per-user** (pas besoin de droits admin)
 //! et s'activent à l'ouverture de session de l'utilisateur — pas au
@@ -132,18 +151,42 @@ pub fn doit_appliquer_defaut(marqueur_present: bool, deja_actif: bool, exe: &Pat
 ///
 /// Renvoie `true` si l'auto-démarrage vient d'être activé par cet appel.
 pub fn appliquer_defaut_une_fois(auto: &AutoLaunch) -> bool {
-    let m = marqueur();
     let exe = match std::env::current_exe() { Ok(p) => p, Err(_) => return false };
-    if !doit_appliquer_defaut(m.exists(), is_enabled(auto), &exe) {
-        // On pose tout de même le marqueur : la décision est prise, une fois.
-        let _ = std::fs::create_dir_all(m.parent().unwrap_or(Path::new(".")));
-        let _ = std::fs::write(&m, b"1");
+    appliquer_avec(&marqueur(), &exe, is_enabled(auto), || enable(auto).is_ok())
+}
+
+/// Le corps testable : le marqueur et l'activation sont INJECTÉS.
+///
+/// ⚠️ Extrait le 10/08/2026 parce qu'une mutation a SURVÉCU — « poser le
+/// marqueur même sur échec » ne faisait rougir aucun test, alors que c'est
+/// exactement le défaut qui condamnerait une machine à ne jamais réessayer.
+/// Une règle qu'aucun test ne peut atteindre n'est pas protégée.
+pub fn appliquer_avec(
+    marqueur: &Path,
+    exe: &Path,
+    deja_actif: bool,
+    activer: impl FnOnce() -> bool,
+) -> bool {
+    let poser_marqueur = || {
+        let _ = std::fs::create_dir_all(marqueur.parent().unwrap_or(Path::new(".")));
+        let _ = std::fs::write(marqueur, b"1");
+    };
+    if !doit_appliquer_defaut(marqueur.exists(), deja_actif, exe) {
+        poser_marqueur();
         return false
     }
-    let ok = enable(auto).is_ok();
-    let _ = std::fs::create_dir_all(m.parent().unwrap_or(Path::new(".")));
-    let _ = std::fs::write(&m, b"1");
-    ok
+    /* ⚠️ LE MARQUEUR NE SE POSE QUE SI L'ACTIVATION A RÉUSSI — corrigé le
+       10/08/2026, au premier essai RÉEL sur une vraie installation.
+       La version précédente l'écrivait dans les deux cas. Un échec (quota,
+       permission refusée, AppleScript indisponible) consommait donc l'unique
+       tentative : l'auto-démarrage restait absent POUR TOUJOURS sur cette
+       machine, sans trace et sans recours. On ne brûle la cartouche que
+       lorsqu'elle a tiré ; un échec sera retenté au prochain démarrage. */
+    if !activer() {
+        return false
+    }
+    poser_marqueur();
+    true
 }
 
 #[cfg(test)]
@@ -195,5 +238,55 @@ mod tests {
     fn rien_a_faire_si_c_est_deja_actif() {
         let installe = PathBuf::from("/usr/local/bin/infinity-node");
         assert!(!doit_appliquer_defaut(false, true, &installe));
+    }
+
+    /// Un dossier de travail jetable, propre à chaque test.
+    fn dossier_jetable(nom: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("infinity-autostart-{nom}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn un_echec_d_activation_ne_brule_pas_la_tentative() {
+        // ⚠️ LE test de ce lot : une mutation « poser le marqueur même sur
+        // échec » ne faisait rougir personne, alors qu'elle condamnerait la
+        // machine à ne JAMAIS réessayer.
+        let d = dossier_jetable("echec");
+        let m = d.join("marqueur");
+        let exe = PathBuf::from("/usr/local/bin/infinity-node");
+
+        assert!(!appliquer_avec(&m, &exe, false, || false));
+        assert!(!m.exists(), "le marqueur a été posé alors que rien n'a été activé");
+
+        // Le démarrage suivant retente, et cette fois ça marche.
+        assert!(appliquer_avec(&m, &exe, false, || true));
+        assert!(m.exists());
+    }
+
+    #[test]
+    fn une_activation_reussie_pose_le_marqueur_et_ne_se_repete_pas() {
+        let d = dossier_jetable("succes");
+        let m = d.join("marqueur");
+        let exe = PathBuf::from("/usr/local/bin/infinity-node");
+
+        assert!(appliquer_avec(&m, &exe, false, || true));
+        // Deuxième démarrage : le marqueur existe, on ne repasse pas.
+        let mut rappele = false;
+        assert!(!appliquer_avec(&m, &exe, false, || { rappele = true; true }));
+        assert!(!rappele, "on a retenté alors que la décision était prise");
+    }
+
+    #[test]
+    fn depuis_les_sources_on_n_active_rien_mais_on_tranche() {
+        let d = dossier_jetable("dev");
+        let m = d.join("marqueur");
+        let dev = PathBuf::from("/Users/x/repo/target/debug/infinity-node");
+        let mut rappele = false;
+        assert!(!appliquer_avec(&m, &dev, false, || { rappele = true; true }));
+        assert!(!rappele, "on a inscrit un binaire de développement");
+        // La décision est prise une fois pour toutes : pas de question à chaque run.
+        assert!(m.exists());
     }
 }
