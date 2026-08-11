@@ -101,6 +101,34 @@ fn lister(dir: &Path) -> Vec<(String, u64)> {
     out
 }
 
+/// Empreinte d'une archive : sa taille et sa date de modification.
+///
+/// ⚠️ PAS un hachage du contenu. Hacher 134 Mo à chaque requête de tuile
+/// coûterait mille fois plus cher que de servir la tuile elle-même. Taille et
+/// date changent dès qu'on remplace le fichier — le seul cas qui nous
+/// intéresse, puisqu'une archive n'est jamais modifiée en place.
+fn empreinte(meta: &std::fs::Metadata) -> String {
+    let secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("\"{}-{}\"", meta.len(), secs)
+}
+
+/// Ce qu'on dit au navigateur sur la durée de vie d'une tuile.
+///
+/// ⚠️ Sans ces en-têtes — l'état livré le 10/08 — le navigateur ne garde RIEN :
+/// repasser sur une zone déjà vue redemande chaque tuile au nœud. En loopback
+/// une plage coûte 1,6 à 2,7 ms (mesuré), donc l'effet est invisible ; il cesse
+/// de l'être dès que le nœud est joint par le réseau local ou par Tailscale, où
+/// le même aller-retour se compte en dizaines de millisecondes.
+///
+/// `immutable` : le contenu d'un octet donné d'une archive ne change jamais. Si
+/// l'archive est remplacée, son empreinte change et le navigateur revalide.
+const CACHE_TUILES: &str = "public, max-age=604800, immutable";
+
 /// `GET /api/tiles` — le catalogue.
 pub async fn list_tiles(headers: HeaderMap) -> impl IntoResponse {
     /* L'URL rendue doit être joignable PAR LE NAVIGATEUR, pas par nous. On la
@@ -156,6 +184,23 @@ pub async fn get_tile_archive(
         return (StatusCode::NOT_FOUND, "archive absente").into_response();
     };
     let taille = meta.len();
+    let etag = empreinte(&meta);
+
+    /* Le navigateur nous rend l'empreinte qu'il détient : si elle correspond,
+       il n'y a rien à renvoyer. ⚠️ On répond AVANT de lire le disque — après,
+       le code serait juste et le coût inchangé. */
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|e| e.trim() == etag))
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, etag)
+            .header(header::CACHE_CONTROL, CACHE_TUILES)
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
 
     let plage = headers
         .get(header::RANGE)
@@ -170,6 +215,8 @@ pub async fn get_tile_archive(
                 .header(header::CONTENT_RANGE, format!("bytes {debut}-{fin}/{taille}"))
                 .header(header::CONTENT_LENGTH, buf.len())
                 .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::ETAG, &etag)
+                .header(header::CACHE_CONTROL, CACHE_TUILES)
                 .body(Body::from(buf))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "lecture impossible").into_response(),
@@ -186,6 +233,8 @@ pub async fn get_tile_archive(
                     .header(header::CONTENT_TYPE, "application/octet-stream")
                     .header(header::CONTENT_LENGTH, buf.len())
                     .header(header::ACCEPT_RANGES, "bytes")
+                    .header(header::ETAG, &etag)
+                    .header(header::CACHE_CONTROL, CACHE_TUILES)
                     .body(Body::from(buf))
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
                 Err(_) => (StatusCode::NOT_FOUND, "archive illisible").into_response(),
@@ -344,5 +393,43 @@ mod tests {
     fn un_dossier_absent_ne_fait_pas_paniquer() {
         // Premier démarrage : `~/.infinity-node/tiles/` n'existe pas encore.
         assert!(lister(Path::new("/tmp/ce-dossier-n-existe-pas-42")).is_empty());
+    }
+
+    #[test]
+    fn l_empreinte_change_quand_l_archive_change() {
+        // ⚠️ Le point de tout le cache : si l'empreinte NE changeait PAS après
+        // remplacement, le navigateur servirait l'ancienne carte pendant une
+        // semaine (`immutable`), sans aucun moyen de s'en apercevoir.
+        let d = dossier_jetable("empreinte");
+        let f = d.join("a.pmtiles");
+        std::fs::write(&f, vec![0u8; 500]).unwrap();
+        let e1 = empreinte(&std::fs::metadata(&f).unwrap());
+
+        // Une taille différente suffit à distinguer.
+        std::fs::write(&f, vec![0u8; 900]).unwrap();
+        let e2 = empreinte(&std::fs::metadata(&f).unwrap());
+        assert_ne!(e1, e2, "l'empreinte n'a pas bougé après remplacement");
+    }
+
+    #[test]
+    fn l_empreinte_est_stable_pour_un_fichier_inchange() {
+        // Sinon chaque requête invaliderait le cache : les en-têtes seraient
+        // là, et le cache n'existerait toujours pas.
+        let d = dossier_jetable("stable");
+        let f = d.join("b.pmtiles");
+        std::fs::write(&f, vec![0u8; 500]).unwrap();
+        let m = std::fs::metadata(&f).unwrap();
+        assert_eq!(empreinte(&m), empreinte(&m));
+    }
+
+    #[test]
+    fn l_empreinte_est_un_etag_bien_forme() {
+        // Un ETag DOIT être entre guillemets : sans eux, les navigateurs
+        // l'ignorent silencieusement — en-tête présent, effet nul.
+        let d = dossier_jetable("forme");
+        let f = d.join("c.pmtiles");
+        std::fs::write(&f, vec![0u8; 128]).unwrap();
+        let e = empreinte(&std::fs::metadata(&f).unwrap());
+        assert!(e.starts_with('"') && e.ends_with('"'), "ETag mal formé : {e}");
     }
 }
