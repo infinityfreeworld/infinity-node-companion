@@ -29,12 +29,28 @@
 //! d'être franchement cassée, ce qui est pire à diagnostiquer. C'est un piège
 //! déjà rencontré côté PWA, noté « ⚠️ 206 pas 200 ».
 //!
+//! ## ⚠️ LE MANIFESTE D'UN PACK — ce qui a été ajouté le 14/08/2026
+//!
+//! Une archive de DONNÉES (le pack « Bivouac » : campings, refuges, aires) est
+//! posée avec un `*.pack.json` à côté d'elle. Ce fichier dit la ZONE couverte,
+//! la DATE de fabrication et ce que le pack **ne contient pas**. Il n'était
+//! servi par rien : ce module ne listait que les `*.pmtiles`.
+//!
+//! Sans lui, l'application ne peut pas distinguer les deux phrases qui, à
+//! l'écran, se ressemblent : « il n'y a aucun camping ici » et « je n'ai pas
+//! les données de cet endroit ». La première est une information, la seconde
+//! un aveu — et une carte vide dit toujours la première. C'est ce qui rend le
+//! manifeste plus important que le pack lui-même.
+//!
+//! Il est annoncé dans `/api/tiles` (champ `manifestUrl`, absent quand il n'y
+//! a pas de manifeste) et servi par la même route que les archives.
+//!
 //! ## Ce que ce module refuse
 //!
-//! Il ne sert QUE `*.pmtiles`, et seulement à la racine du dossier d'archives.
-//! Un chemin contenant un séparateur ou `..` est rejeté sans être interprété :
-//! ce serveur écoute sur une machine personnelle, et une traversée de chemin y
-//! lirait le dossier de départ du Bâtisseur.
+//! Il ne sert QUE `*.pmtiles` et leur `*.pack.json`, et seulement à la racine
+//! du dossier d'archives. Un chemin contenant un séparateur ou `..` est rejeté
+//! sans être interprété : ce serveur écoute sur une machine personnelle, et une
+//! traversée de chemin y lirait le dossier de départ du Bâtisseur.
 
 use axum::{
     body::Body,
@@ -61,6 +77,13 @@ pub struct ArchiveJson {
     pub url: String,
     #[serde(rename = "sizeBytes")]
     pub size_bytes: u64,
+    /// Où lire le manifeste du pack — **absent** quand il n'y en a pas.
+    ///
+    /// ⚠️ `Option` et non chaîne vide : une URL vide serait tentée, échouerait,
+    /// et l'échec se lirait « manifeste illisible » là où la vérité est
+    /// « cette archive n'en a pas » (les fonds de carte n'en ont aucun).
+    #[serde(rename = "manifestUrl", skip_serializing_if = "Option::is_none")]
+    pub manifest_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,10 +101,27 @@ pub fn has_archives() -> bool {
     !lister(&tiles_dir()).is_empty()
 }
 
+/// Une archive du dossier, telle qu'on la trouve sur le disque.
+struct ArchiveDisque {
+    nom: String,
+    taille: u64,
+    /// Nom du `*.pack.json` posé à côté, s'il existe RÉELLEMENT sur le disque.
+    manifeste: Option<String>,
+}
+
+/// Le nom du manifeste attendu à côté d'une archive — `a.pmtiles` → `a.pack.json`.
+///
+/// ⚠️ `strip_suffix` et non `trim_end_matches` : le second retire le suffixe
+/// AUTANT DE FOIS qu'il apparaît, ce qui mutilerait un nom aussi tordu que
+/// `x.pmtiles.pmtiles`. Le cas est improbable ; l'écrire juste ne coûte rien.
+fn nom_manifeste(archive: &str) -> Option<String> {
+    archive.strip_suffix(".pmtiles").map(|base| format!("{base}.pack.json"))
+}
+
 /// Les archives présentes, triées par nom pour un ordre stable d'un appel à
 /// l'autre (une liste qui change d'ordre ferait clignoter le sélecteur).
-fn lister(dir: &Path) -> Vec<(String, u64)> {
-    let mut out: Vec<(String, u64)> = Vec::new();
+fn lister(dir: &Path) -> Vec<ArchiveDisque> {
+    let mut out: Vec<ArchiveDisque> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return out };
     for e in entries.flatten() {
         let path = e.path();
@@ -95,9 +135,14 @@ fn lister(dir: &Path) -> Vec<(String, u64)> {
         if size < 128 {
             continue;
         }
-        out.push((name.to_string(), size));
+        /* ⚠️ On ne DÉDUIT pas le manifeste du nom : on vérifie qu'il est là.
+           Annoncer une URL qui rendra 404 ferait croire à un manifeste perdu
+           en route, alors que la plupart des archives (les fonds de carte)
+           n'en ont simplement jamais eu. */
+        let manifeste = nom_manifeste(name).filter(|m| dir.join(m).is_file());
+        out.push(ArchiveDisque { nom: name.to_string(), taille: size, manifeste });
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort_by(|a, b| a.nom.cmp(&b.nom));
     out
 }
 
@@ -129,6 +174,28 @@ fn empreinte(meta: &std::fs::Metadata) -> String {
 /// l'archive est remplacée, son empreinte change et le navigateur revalide.
 const CACHE_TUILES: &str = "public, max-age=604800, immutable";
 
+/// Ce qu'on dit du MANIFESTE — et pourquoi ce n'est pas `immutable`.
+///
+/// ⚠️ Un manifeste porte la DATE de fabrication du pack. C'est la seule chose
+/// qui empêche de faire confiance en montagne à une photographie d'OSM vieille
+/// de six mois. Le garder une semaine sans revalider ferait afficher une date
+/// FAUSSE le jour où l'on refabrique le pack — précisément le mensonge que ce
+/// fichier existe pour empêcher. Il pèse moins d'un kilo-octet ; on revalide.
+///
+/// `no-cache` ne veut pas dire « ne rien garder » : le navigateur garde et
+/// demande l'accord à chaque fois — un 304 vide, grâce à l'ETag.
+const CACHE_MANIFESTE: &str = "no-cache";
+
+/// Un manifeste est du JSON, une archive des octets. Le dire, sinon le
+/// navigateur télécharge le manifeste au lieu de le lire.
+fn type_contenu(nom: &str) -> &'static str {
+    if nom.ends_with(".pack.json") { "application/json; charset=utf-8" } else { "application/octet-stream" }
+}
+
+fn cache_de(nom: &str) -> &'static str {
+    if nom.ends_with(".pack.json") { CACHE_MANIFESTE } else { CACHE_TUILES }
+}
+
 /// `GET /api/tiles` — le catalogue.
 pub async fn list_tiles(headers: HeaderMap) -> impl IntoResponse {
     /* L'URL rendue doit être joignable PAR LE NAVIGATEUR, pas par nous. On la
@@ -141,21 +208,27 @@ pub async fn list_tiles(headers: HeaderMap) -> impl IntoResponse {
         .unwrap_or("127.0.0.1:7474");
     let archives = lister(&tiles_dir())
         .into_iter()
-        .map(|(name, size_bytes)| ArchiveJson {
-            url: format!("http://{host}/api/tiles/{name}"),
-            name,
-            size_bytes,
+        .map(|a| ArchiveJson {
+            url: format!("http://{host}/api/tiles/{}", a.nom),
+            manifest_url: a.manifeste.map(|m| format!("http://{host}/api/tiles/{m}")),
+            name: a.nom,
+            size_bytes: a.taille,
         })
         .collect::<Vec<_>>();
     Json(TilesJson { active: !archives.is_empty(), archives })
 }
 
 /// Refuse tout nom qui n'est pas un simple fichier d'archive de ce dossier.
+///
+/// ⚠️ Le test `..` passe AVANT tout le reste, et c'est lui qui compte :
+/// `../../.ssh/id_rsa.pack.json` porte une extension autorisée. Élargir la
+/// liste des extensions n'élargit donc pas la surface, tant que ce refus reste
+/// en tête.
 fn nom_sur(nom: &str) -> Option<String> {
     if nom.contains('/') || nom.contains('\\') || nom.contains("..") {
         return None;
     }
-    if !nom.ends_with(".pmtiles") {
+    if !nom.ends_with(".pmtiles") && !nom.ends_with(".pack.json") {
         return None;
     }
     Some(nom.to_string())
@@ -197,7 +270,7 @@ pub async fn get_tile_archive(
         return Response::builder()
             .status(StatusCode::NOT_MODIFIED)
             .header(header::ETAG, etag)
-            .header(header::CACHE_CONTROL, CACHE_TUILES)
+            .header(header::CACHE_CONTROL, cache_de(&nom))
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
@@ -211,12 +284,12 @@ pub async fn get_tile_archive(
         Some((debut, fin)) => match lire_plage(&path, debut, fin).await {
             Ok(buf) => Response::builder()
                 .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_TYPE, type_contenu(&nom))
                 .header(header::CONTENT_RANGE, format!("bytes {debut}-{fin}/{taille}"))
                 .header(header::CONTENT_LENGTH, buf.len())
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::ETAG, &etag)
-                .header(header::CACHE_CONTROL, CACHE_TUILES)
+                .header(header::CACHE_CONTROL, cache_de(&nom))
                 .body(Body::from(buf))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "lecture impossible").into_response(),
@@ -230,11 +303,11 @@ pub async fn get_tile_archive(
             match tokio::fs::read(&path).await {
                 Ok(buf) => Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                    .header(header::CONTENT_TYPE, type_contenu(&nom))
                     .header(header::CONTENT_LENGTH, buf.len())
                     .header(header::ACCEPT_RANGES, "bytes")
                     .header(header::ETAG, &etag)
-                    .header(header::CACHE_CONTROL, CACHE_TUILES)
+                    .header(header::CACHE_CONTROL, cache_de(&nom))
                     .body(Body::from(buf))
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
                 Err(_) => (StatusCode::NOT_FOUND, "archive illisible").into_response(),
@@ -338,6 +411,39 @@ mod tests {
         assert_eq!(nom_sur("vault.ifv"), None);
     }
 
+    #[test]
+    fn le_manifeste_d_un_pack_est_servi() {
+        // Sans lui, l'app ignore la zone couverte et la date du pack — donc
+        // elle ne peut pas distinguer « rien ici » de « je ne sais pas ».
+        assert_eq!(nom_sur("bivouac-france.pack.json"), Some("bivouac-france.pack.json".into()));
+    }
+
+    #[test]
+    fn un_manifeste_ne_peut_pas_non_plus_sortir_du_dossier() {
+        // ⚠️ L'extension autorisée ne suffit jamais : elle se colle à n'importe
+        // quel chemin. C'est le refus des `..` qui protège, et il doit valoir
+        // pour la nouvelle extension comme pour l'ancienne.
+        assert_eq!(nom_sur("../../.ssh/id_rsa.pack.json"), None);
+        assert_eq!(nom_sur("sous/dossier.pack.json"), None);
+    }
+
+    #[test]
+    fn un_manifeste_est_annonce_comme_du_json_et_revalide() {
+        // Servi en octet-stream, le navigateur le TÉLÉCHARGE au lieu de le lire.
+        assert_eq!(type_contenu("bivouac-france.pack.json"), "application/json; charset=utf-8");
+        assert_eq!(type_contenu("atlas.pmtiles"), "application/octet-stream");
+        // ⚠️ `immutable` sur un manifeste = une DATE de pack périmée affichée
+        // une semaine durant, sans moyen de s'en apercevoir.
+        assert_eq!(cache_de("bivouac-france.pack.json"), CACHE_MANIFESTE);
+        assert_eq!(cache_de("atlas.pmtiles"), CACHE_TUILES);
+    }
+
+    #[test]
+    fn le_nom_du_manifeste_se_deduit_de_l_archive() {
+        assert_eq!(nom_manifeste("bivouac-france.pmtiles"), Some("bivouac-france.pack.json".into()));
+        assert_eq!(nom_manifeste("bivouac-france.pack.json"), None);
+    }
+
     fn dossier_jetable(nom: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("infinity-tiles-{nom}"));
         let _ = std::fs::remove_dir_all(&d);
@@ -365,8 +471,31 @@ mod tests {
         ecrire(&d, "vault.ifv", 1000);
         let l = lister(&d);
         assert_eq!(l.len(), 1);
-        assert_eq!(l[0].0, "atlas.pmtiles");
-        assert_eq!(l[0].1, 1000);
+        assert_eq!(l[0].nom, "atlas.pmtiles");
+        assert_eq!(l[0].taille, 1000);
+        // Un fond de carte n'a pas de manifeste, et ce n'est pas un défaut.
+        assert_eq!(l[0].manifeste, None);
+    }
+
+    #[test]
+    fn le_manifeste_pose_a_cote_est_repere() {
+        // ⚠️ C'est TOUT le sujet : le `.pack.json` était sur le disque depuis
+        // le 13/08 et le nœud ne le listait pas. Il n'existait donc pas.
+        let d = dossier_jetable("manifeste");
+        ecrire(&d, "bivouac-france.pmtiles", 9000);
+        std::fs::write(d.join("bivouac-france.pack.json"), b"{}").unwrap();
+        let l = lister(&d);
+        assert_eq!(l.len(), 1, "le manifeste ne doit pas être listé comme une archive");
+        assert_eq!(l[0].manifeste, Some("bivouac-france.pack.json".into()));
+    }
+
+    #[test]
+    fn un_manifeste_absent_n_est_pas_annonce() {
+        // Annoncer une URL qui rendra 404 ferait lire « manifeste perdu » là où
+        // la vérité est « cette archive n'en a jamais eu ».
+        let d = dossier_jetable("sans-manifeste");
+        ecrire(&d, "bivouac-france.pmtiles", 9000);
+        assert_eq!(lister(&d)[0].manifeste, None);
     }
 
     #[test]
@@ -385,7 +514,7 @@ mod tests {
         let d = dossier_jetable("ordre");
         ecrire(&d, "zeta.pmtiles", 500);
         ecrire(&d, "alpha.pmtiles", 500);
-        let noms: Vec<String> = lister(&d).into_iter().map(|(n, _)| n).collect();
+        let noms: Vec<String> = lister(&d).into_iter().map(|a| a.nom).collect();
         assert_eq!(noms, vec!["alpha.pmtiles", "zeta.pmtiles"]);
     }
 
