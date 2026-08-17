@@ -143,6 +143,18 @@ impl PinTracker {
         (count, bytes)
     }
 
+    /// Combien de pins le nœud DÉTIENT réellement, octets à l'appui.
+    ///
+    /// `totals()` compte des enregistrements — des DEMANDES. Le 17/08/2026, un
+    /// nœud en annonçait dix pour zéro octet détenu, et l'interface écrivait
+    /// « 10 contenus gardés ». Ce compteur-ci est le seul qu'on ait le droit de
+    /// présenter comme un contenu conservé ; le publier évite à l'interface de
+    /// devoir lister tous les pins pour l'apprendre.
+    pub fn held_count(&self) -> u64 {
+        let g = self.inner.lock().expect("pin state lock");
+        g.pins.values().filter(|p| p.size_bytes > 0).count() as u64
+    }
+
     /// Insère ou met à jour un record + persistance.
     pub fn upsert(&self, rec: PinRecord) {
         let mut g = self.inner.lock().expect("pin state lock");
@@ -266,4 +278,77 @@ pub fn spawn_janitor(rt: &tokio::runtime::Handle, tracker: PinTracker, kubo: Opt
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un tracker isolé du disque du Bâtisseur — chaque test a son dossier.
+    fn tracker_jetable(nom: &str) -> PinTracker {
+        let dir = std::env::temp_dir().join(format!("infinity-pins-test-{nom}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dossier de test");
+        PinTracker {
+            inner:    Arc::new(Mutex::new(PinState {
+                policy: PinPolicy::default(),
+                pins:   HashMap::new(),
+            })),
+            data_dir: dir,
+        }
+    }
+
+    fn rec(cid: &str, size_bytes: u64) -> PinRecord {
+        PinRecord {
+            cid: cid.to_string(),
+            module: "test".into(),
+            pinned_at: 0,
+            ttl_secs: 0,
+            size_bytes,
+        }
+    }
+
+    /// LE relevé du 17/08/2026 : dix enregistrements, zéro octet détenu.
+    ///
+    /// `totals()` en comptait dix et l'interface écrivait « 10 contenus
+    /// gardés ». Le nœud n'en détenait aucun.
+    #[test]
+    fn held_count_ne_compte_pas_les_demandes_vides() {
+        let t = tracker_jetable("vides");
+        for i in 0..10 {
+            t.upsert(rec(&format!("bafkrei{i}"), 0));
+        }
+        assert_eq!(t.totals().0, 10, "dix demandes enregistrées");
+        assert_eq!(t.totals().1, 0,  "et pas un octet");
+        assert_eq!(t.held_count(), 0, "donc AUCUN contenu détenu");
+    }
+
+    #[test]
+    fn held_count_compte_ceux_qui_ont_des_octets() {
+        let t = tracker_jetable("melange");
+        t.upsert(rec("plein-a", 4096));
+        t.upsert(rec("vide-b", 0));
+        t.upsert(rec("plein-c", 12));
+        assert_eq!(t.totals().0, 3);
+        assert_eq!(t.held_count(), 2, "seuls ceux qui portent des octets comptent");
+    }
+
+    #[test]
+    fn held_count_est_zero_sur_un_noeud_neuf() {
+        assert_eq!(tracker_jetable("neuf").held_count(), 0);
+    }
+
+    /// Un pin réenregistré avec ses octets passe de « demandé » à « détenu ».
+    /// C'est la reprise attendue quand kubo finit par récupérer le contenu.
+    #[test]
+    fn un_pin_qui_recoit_ses_octets_devient_detenu() {
+        let t = tracker_jetable("reprise");
+        t.upsert(rec("bafkrei-x", 0));
+        assert_eq!(t.held_count(), 0);
+        t.upsert(rec("bafkrei-x", 2048));
+        assert_eq!(t.totals().0, 1, "toujours un seul enregistrement");
+        assert_eq!(t.held_count(), 1);
+    }
 }

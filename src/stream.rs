@@ -131,6 +131,7 @@ fn build_snapshot(state: &AppState) -> serde_json::Value {
         ))
         .unwrap_or((0, 0, 0));
     let (managed_pins, managed_bytes) = state.pins.totals();
+    let managed_pins_held = state.pins.held_count();
 
     let mut caps: Vec<&str> = Vec::new();
     if state.kubo_metrics.is_some() { caps.push("ipfs"); }
@@ -149,6 +150,7 @@ fn build_snapshot(state: &AppState) -> serde_json::Value {
         "bytesServed":      bw,
         "managedPins":      managed_pins,
         "managedPinsBytes": managed_bytes,
+        "managedPinsHeld":  managed_pins_held,
         "bandwidthUsedTodayBytes": state.bandwidth.used(),
         "bandwidthCapBytes":       state.bandwidth.cap(),
     })

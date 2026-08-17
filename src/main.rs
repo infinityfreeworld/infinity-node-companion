@@ -161,6 +161,11 @@ struct Handshake {
     managed_pins:     u64,
     #[serde(rename = "managedPinsBytes")]
     managed_pins_bytes: u64,
+    /// Pins dont les octets sont RÉELLEMENT détenus (`size_bytes > 0`).
+    /// Sans lui, l'interface ne peut pas distinguer une demande d'un contenu
+    /// conservé — et elle annonçait « 10 contenus gardés » pour zéro octet.
+    #[serde(rename = "managedPinsHeld")]
+    managed_pins_held: u64,
     #[serde(rename = "bandwidthUsedTodayBytes")]
     bandwidth_used_today_bytes: u64,
     #[serde(rename = "bandwidthCapBytes")]
@@ -194,6 +199,7 @@ async fn handshake(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or((0, 0, 0));
 
     let (managed_pins, managed_bytes) = state.pins.totals();
+    let managed_pins_held = state.pins.held_count();
 
     let body = Handshake {
         service:          SERVICE_TAG,
@@ -208,6 +214,7 @@ async fn handshake(State(state): State<AppState>) -> impl IntoResponse {
         bytes_served:     bw,
         managed_pins,
         managed_pins_bytes:         managed_bytes,
+        managed_pins_held,
         bandwidth_used_today_bytes: state.bandwidth.used(),
         bandwidth_cap_bytes:        state.bandwidth.cap(),
     };
@@ -232,6 +239,9 @@ struct PinResp {
     pinned_at:  u64,
     ttl_secs:   u64,
     size_bytes: u64,
+    /// Le nœud DÉTIENT-il réellement les octets, ou n'a-t-il qu'enregistré la
+    /// demande ? Champ ajouté le 17/08/2026 — cf. `post_pin`.
+    held:       bool,
 }
 
 async fn post_pin(
@@ -249,15 +259,36 @@ async fn post_pin(
     let ttl_hours = req.ttl_hours.unwrap_or(rule.default_ttl_hours);
     let ttl_secs  = (ttl_hours as u64) * 3600;
 
-    // Pin via kubo si dispo
-    let size_bytes = if let Some(pc) = state.pin_client.as_ref() {
-        if let Err(e) = pc.pin_add(&req.cid).await {
-            return (StatusCode::BAD_GATEWAY, format!("kubo pin failed: {e}")).into_response();
+    // ── Un pin ENREGISTRÉ n'est pas un contenu DÉTENU ────────────────────────
+    //
+    // Mesuré le 17/08/2026 sur un nœud réel, allumé depuis cinq heures :
+    // `pins.json` portait 10 enregistrements, tous à `size_bytes: 0`, pendant
+    // que kubo ne détenait qu'un seul pin — le dossier d'accueil livré avec
+    // toute installation neuve. Deux de ces CID, demandés à `ipfs.io` comme à
+    // la passerelle locale, étaient introuvables.
+    //
+    // Ce point d'entrée y était pour deux raisons :
+    //   1. sans kubo, on enregistrait quand même et on répondait 200 ;
+    //   2. avec kubo, `pin_add` peut réussir sans que les octets arrivent —
+    //      `object_size` rend alors 0, et on l'enregistrait comme un succès.
+    //
+    // On garde la trace de la demande (la perdre priverait le Bâtisseur d'une
+    // reprise au prochain démarrage), mais on cesse de l'annoncer comme faite :
+    // `held` dit la vérité, et le code HTTP la répète — **202 Accepted** pour
+    // une demande enregistrée, 200 seulement pour des octets réellement là.
+    let size_bytes = match state.pin_client.as_ref() {
+        Some(pc) => {
+            if let Err(e) = pc.pin_add(&req.cid).await {
+                return (StatusCode::BAD_GATEWAY, format!("kubo pin failed: {e}")).into_response();
+            }
+            pc.object_size(&req.cid).await
         }
-        pc.object_size(&req.cid).await
-    } else {
-        0   // pas de kubo → on track quand même, sera resync au prochain start
+        None => 0,
     };
+    // ⚠️ Un fichier réellement vide sera classé « non détenu ». Cas assez
+    // théorique pour être préféré à l'inverse : annoncer comme gardé un
+    // contenu dont on n'a pas un seul octet.
+    let held = size_bytes > 0;
 
     let rec = PinRecord {
         cid:        req.cid.clone(),
@@ -268,13 +299,15 @@ async fn post_pin(
     };
     state.pins.upsert(rec.clone());
 
-    Json(PinResp {
+    let code = if held { StatusCode::OK } else { StatusCode::ACCEPTED };
+    (code, Json(PinResp {
         cid:        rec.cid,
         module:     rec.module,
         pinned_at:  rec.pinned_at,
         ttl_secs:   rec.ttl_secs,
         size_bytes: rec.size_bytes,
-    }).into_response()
+        held,
+    })).into_response()
 }
 
 async fn delete_pin(
