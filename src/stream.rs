@@ -118,42 +118,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
-/// Construit un snapshot identique en forme à la réponse `/api/handshake`.
-/// On copie la logique du handler HTTP plutôt que de l'appeler — éviter
-/// un import cyclique main.rs ↔ stream.rs.
+/// Construit le snapshot poussé aux clients WebSocket.
+///
+/// ⚠️ Cette fonction RECOPIAIT la logique du handler HTTP « pour éviter un
+/// import cyclique » — et les deux ont divergé : `tiles` n'était annoncée que
+/// par `/api/handshake`. On appelle désormais `crate::snapshot`, source unique.
 fn build_snapshot(state: &AppState) -> serde_json::Value {
-    let (peers, pinned, bw) = state.kubo_metrics
-        .as_ref()
-        .map(|m| (
-            m.peers.load(Ordering::Relaxed),
-            m.pinned_count.load(Ordering::Relaxed),
-            m.bytes_served.load(Ordering::Relaxed),
-        ))
-        .unwrap_or((0, 0, 0));
-    let (managed_pins, managed_bytes) = state.pins.totals();
-    let managed_pins_held = state.pins.held_count();
-
-    let mut caps: Vec<&str> = Vec::new();
-    if state.kubo_metrics.is_some() { caps.push("ipfs"); }
-    if state.nostr_url.is_some()    { caps.push("nostr-relay"); }
-
-    serde_json::json!({
-        "service":          "infinity-node",
-        "version":          env!("CARGO_PKG_VERSION"),
-        "capabilities":     caps,
-        "ipfsGateway":      state.kubo_gateway,
-        "nostrRelayUrl":    state.nostr_url,
-        "publicRelayUrl":   serde_json::Value::Null,
-        "uptime":           state.started_at.elapsed().as_secs(),
-        "peers":            peers,
-        "pinnedCount":      pinned,
-        "bytesServed":      bw,
-        "managedPins":      managed_pins,
-        "managedPinsBytes": managed_bytes,
-        "managedPinsHeld":  managed_pins_held,
-        "bandwidthUsedTodayBytes": state.bandwidth.used(),
-        "bandwidthCapBytes":       state.bandwidth.cap(),
-    })
+    serde_json::to_value(crate::snapshot(state)).unwrap_or(serde_json::Value::Null)
 }
 
 fn hash_value(v: &serde_json::Value) -> u64 {

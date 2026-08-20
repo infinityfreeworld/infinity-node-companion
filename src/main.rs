@@ -81,6 +81,7 @@ mod security;
 mod stream;
 mod supervisor;
 mod tiles;
+mod ui;
 
 use bandwidth::BandwidthTracker;
 use infinity_auth::AuthService;
@@ -139,7 +140,7 @@ pub struct AppState {
 // ── Contrat handshake ────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct Handshake {
+pub struct Handshake {
     service:          &'static str,
     version:          &'static str,
     capabilities:     Vec<&'static str>,
@@ -178,7 +179,17 @@ async fn handshake(State(state): State<AppState>) -> impl IntoResponse {
     if !state.enabled.load(Ordering::Relaxed) {
         return (StatusCode::SERVICE_UNAVAILABLE, "paused").into_response();
     }
+    (StatusCode::OK, Json(snapshot(&state))).into_response()
+}
 
+/// L'état du nœud, en UN seul endroit.
+///
+/// ⚠️ `stream.rs` recopiait cette construction pour ses frames WebSocket, et
+/// les deux avaient déjà divergé : la capacité `tiles` n'existait que du côté
+/// HTTP. Une PWA alimentée par le flux direct ne voyait donc jamais les packs
+/// de tuiles, sans la moindre erreur. Un état servi par deux chemins doit être
+/// bâti par une seule fonction.
+pub fn snapshot(state: &AppState) -> Handshake {
     let mut caps = Vec::new();
     if state.kubo_metrics.is_some() { caps.push("ipfs"); }
     if state.nostr_url.is_some()    { caps.push("nostr-relay"); }
@@ -201,7 +212,7 @@ async fn handshake(State(state): State<AppState>) -> impl IntoResponse {
     let (managed_pins, managed_bytes) = state.pins.totals();
     let managed_pins_held = state.pins.held_count();
 
-    let body = Handshake {
+    Handshake {
         service:          SERVICE_TAG,
         version:          VERSION,
         capabilities:     caps,
@@ -217,8 +228,7 @@ async fn handshake(State(state): State<AppState>) -> impl IntoResponse {
         managed_pins_held,
         bandwidth_used_today_bytes: state.bandwidth.used(),
         bandwidth_cap_bytes:        state.bandwidth.cap(),
-    };
-    (StatusCode::OK, Json(body)).into_response()
+    }
 }
 
 // ── Endpoints pin policy (Phase E.1) ─────────────────────────────────────
@@ -474,6 +484,10 @@ async fn serve_http(state: AppState) {
         // (pas d'auth requise pour le service-discovery côté PWA).
         .route("/api/handshake",   get(handshake))
         .route("/healthz",         get(healthz))
+        // Tableau de bord local (lecture seule) — cf. src/ui.rs pour le
+        // garde anti DNS-rebinding et la CSP.
+        .route("/",                get(ui::page))
+        .route("/ui",              get(ui::page))
         // Phase 2.E — sous-router compat (warn si non signé)
         .merge(legacy_compat)
         // Phase 2.F — sous-routers pairing (public) et protected (strict)
@@ -605,7 +619,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  │                                                 │");
     let bind_display = std::env::var("INFINITY_BIND_ADDR")
         .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
+    /* Une adresse d'écoute n'est pas toujours une adresse à ouvrir : 0.0.0.0
+       signifie « toutes les interfaces », et aucun navigateur n'y va. */
+    let ui_url = format!(
+        "http://{}/ui",
+        bind_display
+            .replace("0.0.0.0", "127.0.0.1")
+            .replace("[::]", "[::1]")
+    );
     println!("  │  Handshake : http://{}/api/handshake │", bind_display);
+    println!("  │  Tableau de bord : {:<29}│", ui_url);
     println!("  │  Kubo      : {:<35}│", kubo_status);
     println!("  │  NOSTR     : {:<35}│", nostr_status);
     println!("  │  PWA cible : {:<35}│", pwa_url);
@@ -642,6 +665,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let item_pins          = MenuItem::new("Pins gérés : 0", false, None);
     let item_bw            = MenuItem::new(format!("BP du jour : 0 / {cap_mb} Mo"), false, None);
     let item_open          = MenuItem::new("Ouvrir Infinity", true, None);
+    // Le tableau de bord du nœud : lisible même quand la PWA ne voit plus
+    // rien, puisqu'il est servi par le nœud lui-même.
+    let item_tableau       = MenuItem::new("Voir l'état du nœud…", true, None);
     let item_toggle        = MenuItem::new("Mettre en pause", true, None);
     // Phase 2.F — génère un pairing token affiché dans les logs
     // (out-of-band : aucun JS ne peut le lire, seul l'utilisateur
@@ -663,6 +689,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     menu.append(&item_bw)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&item_open)?;
+    menu.append(&item_tableau)?;
     menu.append(&item_toggle)?;
     menu.append(&item_pair)?;
     menu.append(&PredefinedMenuItem::separator())?;
@@ -671,6 +698,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     menu.append(&item_quit)?;
 
     let id_open      = item_open.id().clone();
+    let id_tableau   = item_tableau.id().clone();
     let id_toggle    = item_toggle.id().clone();
     let id_pair      = item_pair.id().clone();
     let id_autostart = item_autostart.id().clone();
@@ -685,6 +713,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let menu_channel = MenuEvent::receiver();
     let enabled_for_loop = state.enabled.clone();
     let pwa_url_owned    = pwa_url.clone();
+    let ui_url_owned     = ui_url.clone();
     let pins_for_loop    = pins.clone();
     let bw_for_loop      = bandwidth.clone();
     let auth_for_loop    = state.auth.clone();
@@ -723,6 +752,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id if id == &id_open => {
                     if let Err(e) = open::that_detached(&pwa_url_owned) {
                         warn!("open url failed: {e}");
+                    }
+                }
+                id if id == &id_tableau => {
+                    if let Err(e) = open::that_detached(&ui_url_owned) {
+                        warn!("open dashboard failed: {e}");
                     }
                 }
                 id if id == &id_toggle => {
