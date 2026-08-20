@@ -233,6 +233,41 @@ mod tests {
         }
     }
 
+    /// Le handler complet, sans aucun `AppState` : ce qui se voit ici est ce
+    /// que le navigateur reçoit vraiment (statut, en-têtes, corps).
+    #[tokio::test]
+    async fn un_hote_local_recoit_la_page_et_ses_gardes() {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, "127.0.0.1:7474".parse().unwrap());
+        let r = page(h).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let entetes = r.headers();
+        assert_eq!(entetes[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(entetes[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(entetes[header::CACHE_CONTROL], "no-store");
+        let csp = entetes[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("default-src 'none'"), "CSP trop permissive : {csp}");
+        assert!(csp.contains("connect-src 'self'"), "CSP trop permissive : {csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "CSP trop permissive : {csp}");
+
+        let corps = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(corps.len(), PAGE.len());
+    }
+
+    /// Un site distant qui fait résoudre son nom sur 127.0.0.1 ne doit pas
+    /// récupérer une ligne de la page — ni un message qui la remplacerait.
+    #[tokio::test]
+    async fn un_nom_de_domaine_ne_recoit_pas_la_page() {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, "piege.example".parse().unwrap());
+        let r = page(h).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let corps = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let texte = String::from_utf8_lossy(&corps);
+        assert!(!texte.contains("<html"), "la page a fuité vers un hôte refusé");
+        assert!(texte.contains("DNS-rebinding"), "le refus n'explique pas pourquoi");
+    }
+
     /// Lecture seule : aucune méthode mutante ne doit apparaître dans la page.
     #[test]
     fn la_page_est_en_lecture_seule() {
