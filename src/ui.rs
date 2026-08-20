@@ -192,6 +192,8 @@ mod tests {
             "/ipfs/private/info",
             "/auth/devices",
             "/healthz",
+            "/api/amorcage",
+            "/api/journal",
         ];
         // Les chemins réellement appelés : arguments de fetch() et cible du
         // WebSocket (concaténée à location.host). Surtout PAS toutes les
