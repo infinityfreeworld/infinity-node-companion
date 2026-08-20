@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>infinity-node — état</title>
+<style>
+  :root{
+    --fond:#0b0f14; --carte:#111823; --bord:#1e2a3a; --texte:#c9d6e4;
+    --faible:#6b7f96; --vif:#e6f0fa; --ok:#3fbf7f; --alerte:#e8b53f; --rouge:#e35d5d;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--fond); color:var(--texte);
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  header{
+    position:sticky; top:0; z-index:2; background:var(--fond);
+    border-bottom:1px solid var(--bord); padding:10px 16px;
+    display:flex; flex-wrap:wrap; gap:12px; align-items:baseline;
+  }
+  h1{font-size:14px; margin:0; color:var(--vif); letter-spacing:.5px}
+  .pastille{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px}
+  .p-ok{background:var(--ok)} .p-alerte{background:var(--alerte)} .p-rouge{background:var(--rouge)} .p-inconnu{background:var(--faible)}
+  .grandir{flex:1}
+  main{padding:16px; display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); align-items:start}
+  section{background:var(--carte); border:1px solid var(--bord); border-radius:6px; padding:10px 12px}
+  section.large{grid-column:1/-1}
+  h2{font-size:11px; margin:0 0 8px; color:var(--faible); text-transform:uppercase; letter-spacing:1.2px; font-weight:600}
+  table{width:100%; border-collapse:collapse}
+  td{padding:2px 0; vertical-align:top; word-break:break-all}
+  td.k{color:var(--faible); white-space:nowrap; padding-right:12px; width:1%}
+  td.v{color:var(--vif)}
+  .nul{color:var(--faible); font-style:italic}
+  .rouge{color:var(--rouge)} .alerte{color:var(--alerte)} .ok{color:var(--ok)}
+  .jauge{height:4px; background:#0a1219; border:1px solid var(--bord); border-radius:2px; overflow:hidden; margin-top:6px}
+  .jauge > i{display:block; height:100%; background:var(--ok)}
+  ul.controles{list-style:none; margin:0; padding:0}
+  ul.controles li{padding:3px 0; border-bottom:1px solid #16202c}
+  ul.controles li:last-child{border-bottom:0}
+  .liste{max-height:260px; overflow:auto; border:1px solid var(--bord); border-radius:4px}
+  .liste table{font-size:12px}
+  .liste th{position:sticky; top:0; background:#0d141d; color:var(--faible); font-weight:600; text-align:left; padding:4px 8px; border-bottom:1px solid var(--bord)}
+  .liste td{padding:3px 8px; border-bottom:1px solid #16202c}
+  button{
+    font:inherit; color:var(--texte); background:#16202c; border:1px solid var(--bord);
+    border-radius:4px; padding:4px 10px; cursor:pointer;
+  }
+  button:hover{background:#1d2a38; color:var(--vif)}
+  pre{margin:0; padding:8px; background:#0a1219; border:1px solid var(--bord); border-radius:4px; overflow:auto; max-height:340px; font-size:12px; color:var(--texte)}
+  details summary{cursor:pointer; color:var(--faible)}
+  footer{padding:0 16px 24px; color:var(--faible)}
+  a{color:#6fa8dc}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>infinity-node</h1>
+  <span id="version" class="nul">version ?</span>
+  <span id="liaison"><span class="pastille p-inconnu"></span>liaison…</span>
+  <span class="grandir"></span>
+  <span id="horodatage" class="nul">—</span>
+  <button id="rapport" title="Copie un rapport d'état complet dans le presse-papiers">Copier le rapport</button>
+</header>
+
+<main>
+
+  <section>
+    <h2>Nœud</h2>
+    <table>
+      <tr><td class="k">service</td><td class="v" id="f-service">—</td></tr>
+      <tr><td class="k">version</td><td class="v" id="f-version">—</td></tr>
+      <tr><td class="k">écoute</td><td class="v" id="f-hote">—</td></tr>
+      <tr><td class="k">uptime</td><td class="v" id="f-uptime">—</td></tr>
+      <tr><td class="k">/healthz</td><td class="v" id="f-healthz">—</td></tr>
+      <tr><td class="k">source</td><td class="v" id="f-source">—</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Capacités annoncées à la PWA</h2>
+    <div id="f-caps">—</div>
+    <p class="nul" style="margin:8px 0 0">Liste blanche : la PWA ne tente QUE ce qui figure ici. Une capacité absente est invisible côté navigateur, sans erreur.</p>
+  </section>
+
+  <section>
+    <h2>IPFS</h2>
+    <table>
+      <tr><td class="k">passerelle</td><td class="v" id="f-gw">—</td></tr>
+      <tr><td class="k">pairs</td><td class="v" id="f-peers">—</td></tr>
+      <tr><td class="k">pins kubo</td><td class="v" id="f-pinned">—</td></tr>
+      <tr><td class="k">octets servis</td><td class="v" id="f-served">—</td></tr>
+      <tr><td class="k">mode privé</td><td class="v" id="f-ipfs-prive">—</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Pins gérés — demandés vs détenus</h2>
+    <table>
+      <tr><td class="k">enregistrés</td><td class="v" id="f-pins-dem">—</td></tr>
+      <tr><td class="k">détenus (octets réels)</td><td class="v" id="f-pins-det">—</td></tr>
+      <tr><td class="k">poids total</td><td class="v" id="f-pins-oct">—</td></tr>
+    </table>
+    <p class="nul" style="margin:8px 0 0">Un pin enregistré est une DEMANDE. Seul « détenu » prouve que les octets sont ici.</p>
+  </section>
+
+  <section>
+    <h2>Relais NOSTR</h2>
+    <table>
+      <tr><td class="k">url</td><td class="v" id="f-nostr">—</td></tr>
+      <tr><td class="k">en marche</td><td class="v" id="f-relais-run">—</td></tr>
+      <tr><td class="k">port</td><td class="v" id="f-relais-port">—</td></tr>
+      <tr><td class="k">owner_pubkey</td><td class="v" id="f-relais-owner">—</td></tr>
+      <tr><td class="k">relais public</td><td class="v" id="f-relais-public">—</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Bande passante du jour</h2>
+    <table>
+      <tr><td class="k">utilisée</td><td class="v" id="f-bw">—</td></tr>
+      <tr><td class="k">plafond</td><td class="v" id="f-bwcap">—</td></tr>
+    </table>
+    <div class="jauge"><i id="f-bwjauge" style="width:0%"></i></div>
+  </section>
+
+  <section>
+    <h2>Politique de pin</h2>
+    <table>
+      <tr><td class="k">règle par défaut</td><td class="v" id="f-pol-def">—</td></tr>
+      <tr><td class="k">modules</td><td class="v" id="f-pol-mod">—</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Appareils appairés</h2>
+    <div id="f-devices">—</div>
+  </section>
+
+  <section class="large">
+    <h2>Contrôles — dérivés des valeurs brutes ci-dessus</h2>
+    <ul class="controles" id="f-controles"><li class="nul">en attente de données…</li></ul>
+  </section>
+
+  <section class="large">
+    <h2>Packs de tuiles servis</h2>
+    <div class="liste">
+      <table>
+        <thead><tr><th>archive</th><th>taille</th><th>manifeste</th></tr></thead>
+        <tbody id="f-tuiles"><tr><td colspan="3" class="nul">—</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="large">
+    <h2>Pins enregistrés</h2>
+    <div class="liste">
+      <table>
+        <thead><tr><th>cid</th><th>module</th><th>épinglé le</th><th>ttl</th><th>octets</th></tr></thead>
+        <tbody id="f-liste-pins"><tr><td colspan="5" class="nul">—</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="large">
+    <h2>Brut</h2>
+    <details><summary>voir les réponses telles quelles</summary><pre id="f-brut">—</pre></details>
+  </section>
+
+</main>
+
+<footer>Lecture seule. Aucune action n'est exposée ici — toute écriture passe par une requête signée Ed25519.</footer>
+
+<script>
+(function(){
+  "use strict";
+  var $ = function(id){ return document.getElementById(id); };
+  var etat = {
+    snapshot: null, source: "—", derniereMaj: 0,
+    pins: null, policy: null, tiles: null, relay: null, ipfs: null,
+    healthz: null, devices: null, erreurs: {}
+  };
+
+  // ── formats ────────────────────────────────────────────────────────
+  function octets(n){
+    if (n === null || n === undefined) return "—";
+    if (n === 0) return "0 o";
+    var u = ["o","Ko","Mo","Go","To"], i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1){ v /= 1024; i++; }
+    return (i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)) + " " + u[i] + " (" + n.toLocaleString("fr-FR") + " o)";
+  }
+  function duree(s){
+    if (s === null || s === undefined) return "—";
+    var j = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60), r = s % 60;
+    return (j ? j + "j " : "") + (j || h ? h + "h " : "") + (j || h || m ? m + "m " : "") + r + "s";
+  }
+  function date(ms){ return new Date(ms).toLocaleTimeString("fr-FR"); }
+  function vide(el){ el.textContent = "—"; el.className = "v nul"; }
+  function pose(id, valeur, classe){
+    var el = $(id);
+    if (valeur === null || valeur === undefined || valeur === "") { vide(el); return; }
+    el.textContent = valeur;
+    el.className = "v" + (classe ? " " + classe : "");
+  }
+
+  // ── liaison ────────────────────────────────────────────────────────
+  function liaison(cle, texte){
+    var p = { ok:"p-ok", pause:"p-alerte", perdu:"p-rouge", inconnu:"p-inconnu" }[cle] || "p-inconnu";
+    $("liaison").innerHTML = '<span class="pastille ' + p + '"></span>' + texte;
+  }
+
+  // ── rendu ──────────────────────────────────────────────────────────
+  function rendre(){
+    var d = etat.snapshot;
+    $("horodatage").textContent = etat.derniereMaj ? "maj " + date(etat.derniereMaj) : "—";
+    $("horodatage").className = "";
+    pose("f-hote", location.host);
+    pose("f-source", etat.source);
+    pose("f-healthz", etat.healthz === null ? null : etat.healthz);
+
+    if (d) {
+      $("version").textContent = d.version ? "v" + d.version : "version ?";
+      $("version").className = "";
+      pose("f-service", d.service);
+      pose("f-version", d.version);
+      pose("f-uptime", duree(d.uptime));
+      pose("f-gw", d.ipfsGateway);
+      pose("f-peers", d.peers, d.peers === 0 ? "alerte" : "");
+      pose("f-pinned", d.pinnedCount);
+      pose("f-served", octets(d.bytesServed));
+      pose("f-nostr", d.nostrRelayUrl);
+      pose("f-relais-public", d.publicRelayUrl);
+      pose("f-pins-dem", d.managedPins);
+      pose("f-pins-det", d.managedPinsHeld, (d.managedPins > 0 && d.managedPinsHeld === 0) ? "rouge" : "");
+      pose("f-pins-oct", octets(d.managedPinsBytes), (d.managedPins > 0 && d.managedPinsBytes === 0) ? "rouge" : "");
+      pose("f-bw", octets(d.bandwidthUsedTodayBytes));
+      pose("f-bwcap", octets(d.bandwidthCapBytes));
+      var part = d.bandwidthCapBytes ? Math.min(100, (d.bandwidthUsedTodayBytes / d.bandwidthCapBytes) * 100) : 0;
+      var barre = $("f-bwjauge");
+      barre.style.width = part.toFixed(1) + "%";
+      barre.style.background = part >= 95 ? "var(--rouge)" : part >= 80 ? "var(--alerte)" : "var(--ok)";
+
+      var caps = d.capabilities || [];
+      $("f-caps").innerHTML = caps.length
+        ? caps.map(function(c){ return '<span style="display:inline-block;border:1px solid var(--bord);border-radius:3px;padding:1px 7px;margin:0 5px 5px 0;color:var(--vif)">' + c + "</span>"; }).join("")
+        : '<span class="nul">aucune capacité annoncée</span>';
+    }
+
+    if (etat.relay) {
+      pose("f-relais-run", etat.relay.running ? "oui" : "non", etat.relay.running ? "ok" : "rouge");
+      pose("f-relais-port", etat.relay.port);
+      pose("f-relais-owner", etat.relay.owner_pubkey);
+    }
+    if (etat.ipfs) {
+      pose("f-ipfs-prive", etat.ipfs.private ? ("oui — empreinte " + (etat.ipfs.fingerprint || "?")) : "non (IPFS public)");
+    }
+    if (etat.policy) {
+      var r = etat.policy.default_rule || {};
+      pose("f-pol-def", (r.enabled ? "actif" : "inactif") + " · max " + r.max_mb + " Mo · ttl " + r.default_ttl_hours + " h");
+      var mods = Object.keys(etat.policy.modules || {});
+      pose("f-pol-mod", mods.length ? mods.join(", ") : "aucune règle par module");
+    }
+    if (etat.devices !== null) $("f-devices").innerHTML = etat.devices;
+
+    if (etat.tiles) {
+      var a = etat.tiles.archives || [];
+      $("f-tuiles").innerHTML = a.length ? a.map(function(t){
+        return "<tr><td>" + t.name + "</td><td>" + octets(t.sizeBytes) + "</td><td>" +
+          (t.manifestUrl ? '<span class="ok">présent</span>' : '<span class="alerte">absent</span>') + "</td></tr>";
+      }).join("") : '<tr><td colspan="3" class="nul">aucune archive</td></tr>';
+    }
+    if (etat.pins) {
+      $("f-liste-pins").innerHTML = etat.pins.length ? etat.pins.map(function(p){
+        return "<tr><td>" + p.cid + "</td><td>" + (p.module || "—") + "</td><td>" +
+          new Date(p.pinned_at * 1000).toLocaleString("fr-FR") + "</td><td>" +
+          Math.round(p.ttl_secs / 3600) + " h</td><td class=\"" + (p.size_bytes ? "" : "rouge") + "\">" +
+          (p.size_bytes ? octets(p.size_bytes) : "0 — non détenu") + "</td></tr>";
+      }).join("") : '<tr><td colspan="5" class="nul">aucun pin</td></tr>';
+    }
+
+    controles();
+    $("f-brut").textContent = rapport();
+  }
+
+  // ── contrôles (dérivés, jamais recalculés ailleurs) ────────────────
+  function controles(){
+    var d = etat.snapshot, l = [];
+    function dit(cle, texte){ l.push('<li class="' + cle + '">' + (cle === "ok" ? "✓ " : cle === "rouge" ? "✗ " : "⚠ ") + texte + "</li>"); }
+
+    if (!d) { $("f-controles").innerHTML = '<li class="rouge">✗ aucune donnée du nœud — injoignable ou en pause</li>'; return; }
+
+    if (d.managedPins > 0 && d.managedPinsHeld === 0)
+      dit("rouge", d.managedPins + " pins enregistrés, AUCUN détenu (0 octet) — le nœud annonce des contenus qu'il n'a pas.");
+    else if (d.managedPins > 0 && d.managedPinsHeld < d.managedPins)
+      dit("alerte", (d.managedPins - d.managedPinsHeld) + " pins sur " + d.managedPins + " sans octets sur le disque.");
+    else if (d.managedPins > 0)
+      dit("ok", d.managedPins + " pins enregistrés, tous détenus (" + octets(d.managedPinsBytes) + ").");
+
+    var caps = d.capabilities || [];
+    if (etat.tiles && etat.tiles.active && caps.indexOf("tiles") === -1)
+      dit("rouge", "des archives de tuiles sont sur le disque mais la capacité « tiles » n'est PAS annoncée — la PWA ne les lira jamais.");
+    if (etat.ipfs && etat.ipfs.running && caps.indexOf("ipfs") === -1)
+      dit("rouge", "kubo tourne mais la capacité « ipfs » n'est pas annoncée.");
+    if (etat.relay && etat.relay.running && caps.indexOf("nostr-relay") === -1)
+      dit("rouge", "le relais NOSTR tourne mais la capacité « nostr-relay » n'est pas annoncée.");
+
+    if (caps.indexOf("ipfs") !== -1 && d.peers === 0)
+      dit("alerte", "nœud IPFS actif sans aucun pair — rien ne peut être servi ni récupéré.");
+    if (etat.relay && !etat.relay.running)
+      dit("rouge", "relais NOSTR déclaré mais arrêté.");
+    if (etat.relay && etat.relay.running && !etat.relay.owner_pubkey)
+      dit("alerte", "relais privé sans owner_pubkey : la liste blanche n'est pas appliquée.");
+
+    if (d.bandwidthCapBytes) {
+      var part = (d.bandwidthUsedTodayBytes / d.bandwidthCapBytes) * 100;
+      if (part >= 95) dit("rouge", "plafond de bande passante à " + part.toFixed(0) + "% — le nœud va cesser de servir.");
+      else if (part >= 80) dit("alerte", "bande passante du jour à " + part.toFixed(0) + "% du plafond.");
+    }
+    if (etat.healthz !== "ok") dit("alerte", "/healthz ne répond pas « ok » (" + (etat.healthz || "muet") + ").");
+
+    Object.keys(etat.erreurs).forEach(function(k){
+      if (etat.erreurs[k]) dit("alerte", k + " : " + etat.erreurs[k]);
+    });
+
+    if (!l.length) dit("ok", "aucune anomalie détectée dans les valeurs brutes.");
+    $("f-controles").innerHTML = l.join("");
+  }
+
+  // ── rapport ────────────────────────────────────────────────────────
+  function rapport(){
+    return JSON.stringify({
+      releve_le: new Date().toISOString(),
+      hote: location.host,
+      source: etat.source,
+      derniere_maj: etat.derniereMaj ? new Date(etat.derniereMaj).toISOString() : null,
+      handshake: etat.snapshot,
+      healthz: etat.healthz,
+      policy: etat.policy,
+      relay_prive: etat.relay,
+      ipfs_prive: etat.ipfs,
+      tuiles: etat.tiles,
+      pins: etat.pins,
+      erreurs: etat.erreurs
+    }, null, 2);
+  }
+  $("rapport").addEventListener("click", function(){
+    var t = rapport(), b = $("rapport");
+    function fini(m){ b.textContent = m; setTimeout(function(){ b.textContent = "Copier le rapport"; }, 1800); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function(){ fini("copié ✓"); }, function(){ fini("copie refusée"); });
+    } else {
+      var z = document.createElement("textarea");
+      z.value = t; document.body.appendChild(z); z.select();
+      try { document.execCommand("copy"); fini("copié ✓"); } catch (e) { fini("copie refusée"); }
+      document.body.removeChild(z);
+    }
+  });
+
+  // ── flux direct (WS) + repli HTTP ─────────────────────────────────
+  var ws = null, replisHttp = null;
+
+  function majSnapshot(d, source){
+    etat.snapshot = d; etat.source = source; etat.derniereMaj = Date.now();
+    liaison("ok", source === "ws" ? "flux direct" : "sondage HTTP");
+    rendre();
+  }
+
+  function ouvrirWs(){
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    try { ws = new WebSocket(proto + "//" + location.host + "/api/stream"); }
+    catch (e) { return; }
+    ws.onmessage = function(ev){
+      var f; try { f = JSON.parse(ev.data); } catch (e) { return; }
+      if (f.type === "snapshot") { arreterHttp(); majSnapshot(f.data, "ws"); }
+      else if (f.type === "paused") { etat.source = "ws"; liaison("pause", "nœud EN PAUSE"); rendre(); }
+    };
+    ws.onclose = ws.onerror = function(){
+      ws = null;
+      demarrerHttp();
+      setTimeout(ouvrirWs, 10000);
+    };
+  }
+
+  function demarrerHttp(){ if (!replisHttp) { sonderHandshake(); replisHttp = setInterval(sonderHandshake, 3000); } }
+  function arreterHttp(){ if (replisHttp) { clearInterval(replisHttp); replisHttp = null; } }
+
+  function sonderHandshake(){
+    fetch("/api/handshake", { cache: "no-store" }).then(function(r){
+      if (r.status === 503) { liaison("pause", "nœud EN PAUSE"); etat.source = "http"; rendre(); return null; }
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function(d){ if (d) majSnapshot(d, "http"); })
+      .catch(function(e){ liaison("perdu", "nœud injoignable"); etat.erreurs["/api/handshake"] = String(e.message || e); rendre(); });
+  }
+
+  // ── lectures secondaires ──────────────────────────────────────────
+  function lire(chemin, cle, transforme){
+    return fetch(chemin, { cache: "no-store" }).then(function(r){
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.headers.get("content-type") && r.headers.get("content-type").indexOf("json") !== -1 ? r.json() : r.text();
+    }).then(function(v){
+      etat[cle] = transforme ? transforme(v) : v;
+      delete etat.erreurs[chemin];
+    }).catch(function(e){
+      etat.erreurs[chemin] = String(e.message || e);
+    });
+  }
+
+  function tourSecondaire(){
+    Promise.all([
+      lire("/healthz", "healthz", function(t){ return String(t).trim(); }),
+      lire("/api/pins", "pins"),
+      lire("/api/policy", "policy"),
+      lire("/api/tiles", "tiles"),
+      lire("/relay/private/info", "relay"),
+      lire("/ipfs/private/info", "ipfs"),
+      // Protégé par signature Ed25519 : on affiche le refus tel quel plutôt
+      // qu'une liste vide, qui se lirait « aucun appareil appairé ».
+      fetch("/auth/devices", { cache: "no-store" }).then(function(r){
+        if (r.status === 401 || r.status === 403)
+          return '<span class="nul">protégé — lecture réservée aux requêtes signées Ed25519 (HTTP ' + r.status + ")</span>";
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json().then(function(l){
+          if (!l || !l.length) return '<span class="nul">aucun appareil appairé</span>';
+          return l.map(function(d){ return "<div>" + (d.label || d.pubkey || JSON.stringify(d)) + "</div>"; }).join("");
+        });
+      }).then(function(h){ etat.devices = h; }, function(e){ etat.devices = '<span class="nul">illisible : ' + e + "</span>"; })
+    ]).then(rendre);
+  }
+
+  ouvrirWs();
+  demarrerHttp();
+  tourSecondaire();
+  setInterval(tourSecondaire, 15000);
+})();
+</script>
+</body>
+</html>
