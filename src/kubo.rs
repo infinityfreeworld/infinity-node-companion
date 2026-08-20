@@ -143,10 +143,7 @@ impl KuboBackend {
 // ── Helpers privés ───────────────────────────────────────────────────────
 
 fn repo_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".infinity-node")
-        .join("ipfs")
+    crate::chemins::sous_dossier("ipfs")
 }
 
 /// Lance `ipfs init` si le repo n'existe pas encore. Idempotent.

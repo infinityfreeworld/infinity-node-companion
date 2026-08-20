@@ -67,8 +67,10 @@ use tray_icon::{
     Icon, TrayIconBuilder,
 };
 
+mod amorcage;
 mod api;
 mod autostart;
+mod chemins;
 mod bandwidth;
 mod ipfs_api;
 mod ipfs_private;
@@ -386,6 +388,22 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
 
 // ── HTTP server (async, runs in shared runtime) ──────────────────────────
 
+/// L'adresse d'écoute, résolue une fois pour le serveur d'amorçage comme
+/// pour le serveur définitif — deux résolutions divergentes feraient écouter
+/// le second ailleurs que le premier.
+fn adresse_ecoute() -> SocketAddr {
+    let bind_addr = std::env::var("INFINITY_BIND_ADDR")
+        .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
+    match bind_addr.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("\n  ⚠️  INFINITY_BIND_ADDR='{bind_addr}' invalide : {e}");
+            eprintln!("  Format attendu : <ip>:<port>, ex. 0.0.0.0:7474\n");
+            std::process::exit(1);
+        }
+    }
+}
+
 async fn serve_http(state: AppState) {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -488,6 +506,10 @@ async fn serve_http(state: AppState) {
         // garde anti DNS-rebinding et la CSP.
         .route("/",                get(ui::page))
         .route("/ui",              get(ui::page))
+        // Mêmes endpoints que pendant l'amorçage : la page ne change pas de
+        // langage selon le serveur qui lui répond.
+        .route("/api/amorcage",    get(amorcage::handler_amorcage))
+        .route("/api/journal",     get(amorcage::handler_journal))
         // Phase 2.E — sous-router compat (warn si non signé)
         .merge(legacy_compat)
         // Phase 2.F — sous-routers pairing (public) et protected (strict)
@@ -501,20 +523,11 @@ async fn serve_http(state: AppState) {
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
-    let bind_addr = std::env::var("INFINITY_BIND_ADDR")
-        .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
-    let addr: SocketAddr = match bind_addr.parse() {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("\n  ⚠️  INFINITY_BIND_ADDR='{bind_addr}' invalide : {e}");
-            eprintln!("  Format attendu : <ip>:<port>, ex. 0.0.0.0:7474\n");
-            std::process::exit(1);
-        }
-    };
+    let addr = adresse_ecoute();
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("\n  ⚠️  Impossible de bind {bind_addr} : {e}");
+            eprintln!("\n  ⚠️  Impossible de bind {addr} : {e}");
             eprintln!("  Une autre instance d'Infinity Node tourne déjà ?");
             eprintln!("  (ou port déjà occupé — tente INFINITY_BIND_ADDR=127.0.0.1:7475)\n");
             std::process::exit(1);
@@ -530,9 +543,12 @@ async fn serve_http(state: AppState) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
+        // Tout ce qui part en console atterrit AUSSI dans le journal en
+        // mémoire, que le tableau de bord sait montrer.
+        .with_writer(amorcage::EcrivainJournal)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "infinity_node=info,tower_http=warn,child=info,supervisor=info".into()),
+                .unwrap_or_else(|_| "infinity_node=info,tower_http=warn,child=info,supervisor=info,amorcage=info".into()),
         )
         .init();
 
@@ -549,11 +565,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(DEFAULT_BW_CAP_MB);
     let bandwidth = BandwidthTracker::new(cap_mb * 1024 * 1024);
 
+    // 2.b Serveur d'amorçage — le tableau de bord répond AVANT l'init
+    // sécurité, sinon il est muet pendant exactement la panne qu'il devrait
+    // expliquer (attente d'autorisation du trousseau, gel au démarrage).
+    let (arreter_amorcage, signal_arret) = tokio::sync::oneshot::channel();
+    let tache_amorcage = rt.spawn(amorcage::servir(adresse_ecoute(), signal_arret));
+
     // 3. Phase 2.F + 3.A — security stack EN PREMIER pour que le relai
     // NOSTR puisse lire la owner_pubkey du Bâtisseur dans le vault au
     // démarrage (whitelist write, mode privé).
     // Boot fail si Keychain OS indispo (Linux sans gnome-keyring) —
     // message exploitable + exit 1.
+    amorcage::etape(amorcage::Etape::Securite);
     let security = match security::init() {
         Ok(s) => s,
         Err(e) => {
@@ -580,6 +603,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // 5. Backends — try_start retourne None si binaire absent
+    amorcage::etape(amorcage::Etape::SousProcessus);
     let kubo  = KuboBackend::try_start(rt.handle(), bandwidth.clone());
     let nostr = NostrRelayBackend::try_start_with_config(NostrRelayConfig {
         owner_pubkey: nostr_relay_owner.clone(),
@@ -609,8 +633,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nostr_relay_owner: nostr.as_ref().and_then(|n| n.applied_owner_pubkey.clone()),
     };
 
-    // 6. HTTP server task
+    // 6. HTTP server task — on rend d'abord le port : le serveur d'amorçage
+    // écoute la même adresse, et deux `bind` concurrents se refusent l'un
+    // l'autre. On attend donc que sa tâche soit VRAIMENT finie (son listener
+    // n'est fermé qu'à ce moment-là), pas seulement que le signal soit posté.
+    let _ = arreter_amorcage.send(());
+    rt.block_on(async {
+        if let Err(e) = tache_amorcage.await {
+            warn!("serveur d'amorçage terminé anormalement : {e}");
+        }
+    });
     rt.spawn(serve_http(state.clone()));
+    amorcage::etape(amorcage::Etape::Pret);
 
     let pwa_url = std::env::var("INFINITY_URL").unwrap_or_else(|_| DEFAULT_PWA_URL.into());
 

@@ -65,10 +65,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 /// Où vivent les archives. Même dossier que le reste de l'état du nœud.
 pub fn tiles_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".infinity-node")
-        .join("tiles")
+    crate::chemins::sous_dossier("tiles")
 }
 
 #[derive(Serialize)]

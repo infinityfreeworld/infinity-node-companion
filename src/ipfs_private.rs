@@ -119,10 +119,7 @@ impl Drop for SwarmKey {
 /// Identique à `kubo.rs::repo_path()`.
 #[must_use]
 pub fn ipfs_repo_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".infinity-node")
-        .join("ipfs")
+    crate::chemins::sous_dossier("ipfs")
 }
 
 #[must_use]

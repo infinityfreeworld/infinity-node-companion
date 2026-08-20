@@ -139,6 +139,20 @@
   </section>
 
   <section class="large">
+    <h2>Amorçage</h2>
+    <table>
+      <tr><td class="k">étape</td><td class="v" id="f-etape">—</td></tr>
+      <tr><td class="k">depuis</td><td class="v" id="f-etape-depuis">—</td></tr>
+    </table>
+    <p id="f-explication" style="margin:8px 0 0; display:none"></p>
+  </section>
+
+  <section class="large">
+    <h2>Journal du nœud</h2>
+    <pre id="f-journal">—</pre>
+  </section>
+
+  <section class="large">
     <h2>Contrôles — dérivés des valeurs brutes ci-dessus</h2>
     <ul class="controles" id="f-controles"><li class="nul">en attente de données…</li></ul>
   </section>
@@ -179,7 +193,7 @@
   var etat = {
     snapshot: null, source: "—", derniereMaj: 0,
     pins: null, policy: null, tiles: null, relay: null, ipfs: null,
-    healthz: null, devices: null, erreurs: {}
+    healthz: null, devices: null, amorcage: null, journal: null, erreurs: {}
   };
 
   // ── formats ────────────────────────────────────────────────────────
@@ -280,6 +294,26 @@
       }).join("") : '<tr><td colspan="5" class="nul">aucun pin</td></tr>';
     }
 
+    var a = etat.amorcage;
+    if (a) {
+      pose("f-etape", a.libelle + (a.pret ? "" : " …"), a.pret ? "ok" : "alerte");
+      pose("f-etape-depuis", duree(a.depuisSecs));
+      var ex = $("f-explication");
+      if (a.explication) {
+        ex.textContent = "⚠ " + a.explication;
+        ex.className = "alerte";
+        ex.style.display = "";
+      } else {
+        ex.style.display = "none";
+      }
+    }
+    if (etat.journal && etat.journal.lignes) {
+      var j = $("f-journal");
+      var enBas = j.scrollTop + j.clientHeight >= j.scrollHeight - 8;
+      j.textContent = etat.journal.lignes.join("\n") || "—";
+      if (enBas) j.scrollTop = j.scrollHeight;
+    }
+
     controles();
     $("f-brut").textContent = rapport();
   }
@@ -289,7 +323,16 @@
     var d = etat.snapshot, l = [];
     function dit(cle, texte){ l.push('<li class="' + cle + '">' + (cle === "ok" ? "✓ " : cle === "rouge" ? "✗ " : "⚠ ") + texte + "</li>"); }
 
-    if (!d) { $("f-controles").innerHTML = '<li class="rouge">✗ aucune donnée du nœud — injoignable ou en pause</li>'; return; }
+    if (!d) {
+      var a = etat.amorcage;
+      if (a && !a.pret) {
+        $("f-controles").innerHTML = '<li class="alerte">⚠ le nœud n\'est pas encore prêt — étape « ' + a.libelle +
+          " » depuis " + duree(a.depuisSecs) + (a.explication ? ". " + a.explication : "") + "</li>";
+      } else {
+        $("f-controles").innerHTML = '<li class="rouge">✗ aucune donnée du nœud — injoignable ou en pause</li>';
+      }
+      return;
+    }
 
     if (d.managedPins > 0 && d.managedPinsHeld === 0)
       dit("rouge", d.managedPins + " pins enregistrés, AUCUN détenu (0 octet) — le nœud annonce des contenus qu'il n'a pas.");
@@ -318,7 +361,9 @@
       if (part >= 95) dit("rouge", "plafond de bande passante à " + part.toFixed(0) + "% — le nœud va cesser de servir.");
       else if (part >= 80) dit("alerte", "bande passante du jour à " + part.toFixed(0) + "% du plafond.");
     }
-    if (etat.healthz !== "ok") dit("alerte", "/healthz ne répond pas « ok » (" + (etat.healthz || "muet") + ").");
+    // Pendant l'amorçage, /healthz répond « amorçage » : ce n'est pas une panne.
+    if (etat.healthz !== "ok" && !(etat.amorcage && !etat.amorcage.pret))
+      dit("alerte", "/healthz ne répond pas « ok » (" + (etat.healthz || "muet") + ").");
 
     Object.keys(etat.erreurs).forEach(function(k){
       if (etat.erreurs[k]) dit("alerte", k + " : " + etat.erreurs[k]);
@@ -336,12 +381,14 @@
       source: etat.source,
       derniere_maj: etat.derniereMaj ? new Date(etat.derniereMaj).toISOString() : null,
       handshake: etat.snapshot,
+      amorcage: etat.amorcage,
       healthz: etat.healthz,
       policy: etat.policy,
       relay_prive: etat.relay,
       ipfs_prive: etat.ipfs,
       tuiles: etat.tiles,
       pins: etat.pins,
+      journal: etat.journal ? etat.journal.lignes : null,
       erreurs: etat.erreurs
     }, null, 2);
   }
@@ -392,7 +439,12 @@
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     }).then(function(d){ if (d) majSnapshot(d, "http"); })
-      .catch(function(e){ liaison("perdu", "nœud injoignable"); etat.erreurs["/api/handshake"] = String(e.message || e); rendre(); });
+      .catch(function(e){
+        var a = etat.amorcage;
+        if (a && !a.pret) liaison("pause", "amorçage : " + a.libelle);
+        else { liaison("perdu", "nœud injoignable"); etat.erreurs["/api/handshake"] = String(e.message || e); }
+        rendre();
+      });
   }
 
   // ── lectures secondaires ──────────────────────────────────────────
@@ -404,7 +456,10 @@
       etat[cle] = transforme ? transforme(v) : v;
       delete etat.erreurs[chemin];
     }).catch(function(e){
-      etat.erreurs[chemin] = String(e.message || e);
+      // Même raison : pendant l'amorçage, les endpoints du nœud définitif
+      // n'existent pas encore. On n'accuse pas un démarrage en cours.
+      if (etat.amorcage && !etat.amorcage.pret) delete etat.erreurs[chemin];
+      else etat.erreurs[chemin] = String(e.message || e);
     });
   }
 
@@ -419,6 +474,11 @@
       // Protégé par signature Ed25519 : on affiche le refus tel quel plutôt
       // qu'une liste vide, qui se lirait « aucun appareil appairé ».
       fetch("/auth/devices", { cache: "no-store" }).then(function(r){
+        // Pendant l'amorçage, seul le serveur d'amorçage répond : ses 404 ne
+        // sont pas des pannes, et les afficher comme telles ferait douter
+        // d'un nœud qui démarre normalement.
+        if (r.status === 404 && etat.amorcage && !etat.amorcage.pret)
+          return '<span class="nul">non disponible pendant l\'amorçage</span>';
         if (r.status === 401 || r.status === 403)
           return '<span class="nul">protégé — lecture réservée aux requêtes signées Ed25519 (HTTP ' + r.status + ")</span>";
         if (!r.ok) throw new Error("HTTP " + r.status);
@@ -430,9 +490,20 @@
     ]).then(rendre);
   }
 
+  // L'amorçage et le journal se rafraîchissent vite : c'est pendant les
+  // premières secondes qu'ils servent à quelque chose.
+  function tourRapide(){
+    Promise.all([
+      lire("/api/amorcage", "amorcage"),
+      lire("/api/journal", "journal")
+    ]).then(rendre);
+  }
+
   ouvrirWs();
   demarrerHttp();
+  tourRapide();
   tourSecondaire();
+  setInterval(tourRapide, 3000);
   setInterval(tourSecondaire, 15000);
 })();
 </script>
