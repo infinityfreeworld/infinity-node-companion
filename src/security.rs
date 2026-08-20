@@ -79,6 +79,15 @@ pub enum SecurityInitError {
     BootPassphraseCorrupted,
 }
 
+/// Empreinte courte et stable d'un dossier d'état — sert à nommer l'identité
+/// d'une instance isolée sans qu'elle puisse collider avec une autre.
+fn empreinte_dossier(dir: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(dir.to_string_lossy().as_bytes());
+    hex::encode(h.finalize())[..8].to_string()
+}
+
 /// Initialise tout : crée le dossier data, le vault, l'identity,
 /// le service auth. Idempotent — relancer l'app n'écrase rien.
 pub fn init() -> Result<SecurityStack, SecurityInitError> {
@@ -97,8 +106,22 @@ pub fn init() -> Result<SecurityStack, SecurityInitError> {
     };
     let vault = Arc::new(vault);
 
+    /* Nom de l'identité dans le trousseau. Une instance dont l'état a été
+       déplacé (INFINITY_DATA_DIR) reçoit SA PROPRE identité : elle ouvre un
+       vault neuf, donc `load` ne trouve rien, donc elle tente de créer
+       « default »… que le trousseau refuse, puisqu'il appartient déjà au
+       nœud de production. Résultat sans ce garde : l'instance d'essai ne
+       démarre pas du tout (`identity already exists with this name`).
+       Un nœud d'essai NE DOIT DE TOUTE FAÇON PAS emprunter l'identité du
+       nœud de production — l'isolation vaut aussi pour la clé. */
+    let nom_identite = if crate::chemins::dossier_deplace() {
+        format!("{COMPANION_IDENTITY_NAME}-{}", empreinte_dossier(&data_dir))
+    } else {
+        COMPANION_IDENTITY_NAME.to_string()
+    };
+
     // Identity du companion : load si existe, create sinon.
-    let identity = match Identity::load(&vault, &kc, COMPANION_IDENTITY_NAME) {
+    let identity = match Identity::load(&vault, &kc, &nom_identite) {
         Ok(id) => {
             info!(pubkey = %id.public_key(), "companion identity loaded");
             id
@@ -107,7 +130,7 @@ pub fn init() -> Result<SecurityStack, SecurityInitError> {
             let id = Identity::create(
                 &vault,
                 &kc,
-                COMPANION_IDENTITY_NAME,
+                &nom_identite,
                 "Infinity Node Companion",
             )?;
             info!(pubkey = %id.public_key(), "new companion identity created");
@@ -129,8 +152,16 @@ fn ensure_data_dir() -> Result<PathBuf, SecurityInitError> {
     //   macOS  → ~/Library/Application Support
     //   Linux  → ~/.local/share
     //   Win    → %LOCALAPPDATA%
-    let base = dirs::data_local_dir().ok_or(SecurityInitError::NoDataDir)?;
-    let dir = base.join("infinity-node");
+    /* Le vault suit l'état du nœud QUAND on l'a explicitement déplacé
+       (INFINITY_DATA_DIR) : une instance d'essai ne doit pas écrire dans le
+       coffre du nœud de production. Sans la variable, rien ne bouge — le
+       chemin historique reste le chemin historique. */
+    let dir = if crate::chemins::dossier_deplace() {
+        crate::chemins::sous_dossier("securite")
+    } else {
+        let base = dirs::data_local_dir().ok_or(SecurityInitError::NoDataDir)?;
+        base.join("infinity-node")
+    };
     std::fs::create_dir_all(&dir)?;
 
     #[cfg(unix)]
@@ -175,5 +206,20 @@ fn ensure_boot_passphrase(kc: &OsKeyring) -> Result<SecretString, SecurityInitEr
             Err(SecurityInitError::KeychainUnavailable)
         }
         Err(e) => Err(SecurityInitError::Identity(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn lempreinte_dun_dossier_est_stable_et_distincte() {
+        let a = PathBuf::from("/tmp/noeud-essai");
+        let b = PathBuf::from("/tmp/noeud-essai-2");
+        assert_eq!(empreinte_dossier(&a), empreinte_dossier(&a));
+        assert_ne!(empreinte_dossier(&a), empreinte_dossier(&b));
+        assert_eq!(empreinte_dossier(&a).len(), 8);
     }
 }

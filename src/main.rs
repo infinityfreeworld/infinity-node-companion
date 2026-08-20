@@ -69,6 +69,7 @@ use tray_icon::{
 
 mod api;
 mod autostart;
+mod chemins;
 mod bandwidth;
 mod ipfs_api;
 mod ipfs_private;

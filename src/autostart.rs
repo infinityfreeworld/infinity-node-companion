@@ -117,10 +117,7 @@ use std::path::{Path, PathBuf};
 
 /// Marqueur : le défaut a déjà été appliqué une fois sur cette machine.
 fn marqueur() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".infinity-node")
-        .join("autostart-defaut-applique")
+    crate::chemins::sous_dossier("autostart-defaut-applique")
 }
 
 /// Un binaire lancé depuis l'arbre de compilation — chemin non pérenne.

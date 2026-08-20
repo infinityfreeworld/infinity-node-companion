@@ -185,9 +185,7 @@ impl PinTracker {
 // ── Helpers IO ───────────────────────────────────────────────────────────
 
 fn data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".infinity-node")
+    crate::chemins::dossier_donnees()
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Option<T> {

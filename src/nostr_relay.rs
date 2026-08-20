@@ -125,10 +125,7 @@ impl NostrRelayBackend {
 }
 
 fn data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".infinity-node")
-        .join("relay")
+    crate::chemins::sous_dossier("relay")
 }
 
 /// Génère le `config.toml` selon la config. Si `owner_pubkey` est défini,
