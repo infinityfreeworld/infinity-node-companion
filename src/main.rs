@@ -80,6 +80,7 @@ mod pinning;
 mod relay_api;
 mod relay_installer;
 mod security;
+mod stockage;
 mod stream;
 mod supervisor;
 mod tiles;
@@ -515,6 +516,7 @@ async fn serve_http(state: AppState) {
         // langage selon le serveur qui lui répond.
         .route("/api/amorcage",    get(amorcage::handler_amorcage))
         .route("/api/journal",     get(amorcage::handler_journal))
+        .route("/api/stockage",    get(stockage::handler))
         // Phase 2.E — sous-router compat (warn si non signé)
         .merge(legacy_compat)
         // Phase 2.F — sous-routers pairing (public) et protected (strict)

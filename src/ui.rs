@@ -194,6 +194,7 @@ mod tests {
             "/healthz",
             "/api/amorcage",
             "/api/journal",
+            "/api/stockage",
         ];
         // Les chemins réellement appelés : arguments de fetch() et cible du
         // WebSocket (concaténée à location.host). Surtout PAS toutes les

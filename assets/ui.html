@@ -217,6 +217,18 @@
     <div id="f-devices">—</div>
   </section>
 
+  <section>
+    <h2>Poids sur la machine</h2>
+    <table>
+      <tr><td class="k">dépôt IPFS</td><td class="v" id="f-poids-ipfs">—</td></tr>
+      <tr><td class="k">tuiles</td><td class="v" id="f-poids-tuiles">—</td></tr>
+      <tr><td class="k">base du relais</td><td class="v" id="f-poids-relais">—</td></tr>
+      <tr><td class="k">anciens binaires</td><td class="v" id="f-poids-sauv">—</td></tr>
+      <tr><td class="k">total</td><td class="v" id="f-poids-total">—</td></tr>
+    </table>
+    <p class="nul" id="f-poids-note" style="margin:8px 0 0">Mesuré sur le disque, pas estimé. Rafraîchi au plus toutes les 5 min.</p>
+  </section>
+
   <section class="large">
     <h2>Amorçage</h2>
     <table>
@@ -272,7 +284,7 @@
   var etat = {
     snapshot: null, source: "—", derniereMaj: 0,
     pins: null, policy: null, tiles: null, relay: null, ipfs: null,
-    healthz: null, devices: null, amorcage: null, journal: null, erreurs: {}
+    healthz: null, devices: null, amorcage: null, journal: null, stockage: null, erreurs: {}
   };
 
   // ── formats ────────────────────────────────────────────────────────
@@ -373,6 +385,19 @@
       }).join("") : '<tr><td colspan="5" class="nul">aucun pin</td></tr>';
     }
 
+    var st = etat.stockage;
+    if (st && st.detail) {
+      pose("f-poids-ipfs", octets(st.detail.ipfs.octets) + " · " + st.detail.ipfs.fichiers + " fichiers");
+      pose("f-poids-tuiles", octets(st.detail.tuiles.octets));
+      pose("f-poids-relais", octets(st.detail.relais.octets));
+      pose("f-poids-sauv", octets(st.detail.sauvegardes.octets), st.detail.sauvegardes.octets > 50 * 1024 * 1024 ? "alerte" : "");
+      pose("f-poids-total", octets(st.total));
+      $("f-poids-note").textContent = st.tronque
+        ? "⚠ mesure INCOMPLÈTE : trop de fichiers à parcourir, le total est un minimum."
+        : "Mesuré sur le disque (" + st.dossier + "), pas estimé. Rafraîchi au plus toutes les 5 min.";
+      $("f-poids-note").className = st.tronque ? "alerte" : "nul";
+    }
+
     var a = etat.amorcage;
     if (a) {
       pose("f-etape", a.libelle + (a.pret ? "" : " …"), a.pret ? "ok" : "alerte");
@@ -428,6 +453,14 @@
     if (etat.relay && etat.relay.running && caps.indexOf("nostr-relay") === -1)
       dit("rouge", "le relais NOSTR tourne mais la capacité « nostr-relay » n'est pas annoncée.");
 
+    var st2 = etat.stockage;
+    if (st2 && st2.detail && caps.indexOf("ipfs") !== -1 &&
+        st2.detail.ipfs.octets < 1024 * 1024 && d.managedPinsHeld === 0)
+      dit("alerte", "le dépôt IPFS ne contient que " + octets(st2.detail.ipfs.octets) +
+          " : le nœud fait tourner un daemon complet (~80 Mo de mémoire) sans rien détenir.");
+    if (st2 && st2.detail && st2.detail.sauvegardes.octets > 50 * 1024 * 1024)
+      dit("alerte", octets(st2.detail.sauvegardes.octets) + " d'anciens binaires s'accumulent dans sauvegarde-binaire/.");
+
     if (caps.indexOf("ipfs") !== -1 && d.peers === 0)
       dit("alerte", "nœud IPFS actif sans aucun pair — rien ne peut être servi ni récupéré.");
     if (etat.relay && !etat.relay.running)
@@ -466,6 +499,7 @@
       relay_prive: etat.relay,
       ipfs_prive: etat.ipfs,
       tuiles: etat.tiles,
+      stockage: etat.stockage,
       pins: etat.pins,
       journal: etat.journal ? etat.journal.lignes : null,
       erreurs: etat.erreurs
@@ -557,6 +591,7 @@
       lire("/api/pins", "pins"),
       lire("/api/policy", "policy"),
       lire("/api/tiles", "tiles"),
+      lire("/api/stockage", "stockage"),
       lire("/relay/private/info", "relay"),
       lire("/ipfs/private/info", "ipfs"),
       // Protégé par signature Ed25519 : on affiche le refus tel quel plutôt
