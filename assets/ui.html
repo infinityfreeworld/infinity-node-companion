@@ -49,6 +49,15 @@
   button:hover{background:#1d2a38; color:var(--vif)}
   pre{margin:0; padding:8px; background:#0a1219; border:1px solid var(--bord); border-radius:4px; overflow:auto; max-height:340px; font-size:12px; color:var(--texte)}
   details summary{cursor:pointer; color:var(--faible)}
+  #tutoriel summary{color:#6fa8dc; font-size:13px}
+  #tutoriel[open] summary{margin-bottom:10px}
+  .tuto{max-width:78ch; line-height:1.65}
+  .tuto h3{font-size:12px; color:var(--vif); text-transform:uppercase; letter-spacing:1px; margin:16px 0 6px}
+  .tuto h3:first-child{margin-top:4px}
+  .tuto p{margin:0 0 8px}
+  .tuto b{color:var(--vif); font-weight:600}
+  .tuto code{background:#0a1219; border:1px solid var(--bord); border-radius:3px; padding:0 4px}
+  #lien-explication{font-size:12px; text-decoration:none; border-bottom:1px dotted currentColor}
   footer{padding:0 16px 24px; color:var(--faible)}
   a{color:#6fa8dc}
 </style>
@@ -59,12 +68,82 @@
   <h1>infinity-node</h1>
   <span id="version" class="nul">version ?</span>
   <span id="liaison"><span class="pastille p-inconnu"></span>liaison…</span>
+  <a href="#explication" id="lien-explication">Explication du nœud</a>
   <span class="grandir"></span>
   <span id="horodatage" class="nul">—</span>
   <button id="rapport" title="Copie un rapport d'état complet dans le presse-papiers">Copier le rapport</button>
 </header>
 
 <main>
+
+  <section class="large" id="explication">
+    <details id="tutoriel">
+      <summary>Explication du nœud — à quoi sert tout ça ?</summary>
+      <div class="tuto">
+        <h3>En une phrase</h3>
+        <p>Ce programme fait de ton ordinateur un <b>participant</b> d'Infinity, et
+        plus seulement un visiteur : il garde tes contenus, transporte tes messages
+        et sert tes cartes, sans passer par le serveur de quelqu'un d'autre. Cette
+        page est son tableau de bord : elle <b>montre</b>, elle ne commande rien.</p>
+
+        <h3>Les trois métiers du nœud</h3>
+        <p><b>💾 IPFS</b> — l'entrepôt. Il détient des fichiers et les sert aux autres.
+        Chaque contenu y est désigné par un <i>CID</i>, une empreinte : deux fichiers
+        identiques ont le même CID, où qu'ils soient. « Pairs » = les autres machines
+        avec lesquelles le tien est en contact en ce moment.</p>
+        <p><b>🛰️ Le relais NOSTR</b> — la poste. Il reçoit et redistribue les messages
+        signés (publications, discussions). « Privé » veut dire que seul le porteur de
+        la clé inscrite (<i>owner_pubkey</i>) a le droit d'y écrire ; sans elle, la
+        liste blanche n'est pas appliquée.</p>
+        <p><b>🗺️ Les tuiles</b> — les cartes hors-ligne. Des archives posées sur ton
+        disque, que le nœud sert au navigateur. C'est ce qui permet à la carte de
+        fonctionner sans Internet.</p>
+
+        <h3>Le piège à connaître : demandé n'est pas détenu</h3>
+        <p>Un <b>pin enregistré</b> est une <i>demande</i> : « garde-moi ce contenu ».
+        Un <b>pin détenu</b> veut dire que les octets sont vraiment sur ton disque.
+        Les deux chiffres peuvent être très différents — « 10 enregistrés / 0 détenu »
+        signifie que ton nœud n'a rien, malgré les apparences. C'est pour ça que cette
+        page affiche toujours les deux.</p>
+
+        <h3>« Capacités annoncées » — pourquoi c'est important</h3>
+        <p>Le nœud dit à l'application ce qu'il sait faire, et l'application
+        <b>ne tente que ce qui figure dans cette liste</b>. Une capacité absente n'est
+        pas une erreur visible : la fonction n'existe simplement pas côté navigateur.
+        Si tu as des cartes sur le disque mais que <code>tiles</code> n'est pas annoncé,
+        la carte restera vide sans rien dire.</p>
+
+        <h3>Bande passante</h3>
+        <p>Le nœud sert des contenus aux autres, donc il consomme du réseau. Le plafond
+        du jour l'empêche de manger ta connexion : arrivé au bout, il cesse de servir
+        jusqu'au lendemain. Réglable au lancement avec <code>INFINITY_BW_CAP_MB</code>.</p>
+
+        <h3>Amorçage et journal</h3>
+        <p>Le nœud n'est pas joignable instantanément : il ouvre d'abord son coffre et
+        son identité, puis démarre IPFS et le relais. Cette page répond <b>dès le
+        début</b> et affiche l'étape en cours — utile surtout quand ça bloque : après
+        chaque mise à jour, macOS redemande l'autorisation d'accéder au trousseau et le
+        nœud <b>attend ton clic</b> sur « Toujours autoriser ». Le journal montre les
+        dernières lignes que le nœud a écrites : c'est là qu'on lit la vraie cause.</p>
+
+        <h3>Que faire quand une ligne est rouge ?</h3>
+        <p>Les « contrôles » ne sont pas des alarmes décoratives : chacun dit ce qui
+        est faux. Dans l'ordre de gravité : <b>rouge</b> = le nœud annonce ou promet
+        quelque chose qu'il ne tient pas ; <b>jaune</b> = ça fonctionne mais quelque
+        chose mérite ton attention. Le bouton <b>« Copier le rapport »</b>, en haut à
+        droite, met tout l'état brut dans le presse-papiers — c'est ce qu'il faut
+        coller pour se faire aider.</p>
+
+        <h3>Pause, et ce que ça n'est pas</h3>
+        <p>« Mettre en pause » depuis la barre de menus rend le nœud invisible à
+        l'application, mais IPFS et le relais continuent de tourner : c'est un rideau,
+        pas un interrupteur. Pour tout arrêter, il faut quitter l'application.</p>
+
+        <p class="nul">Cette page ne peut rien modifier : toute écriture passe par une
+        requête signée avec ta clé. On peut la regarder sans rien risquer.</p>
+      </div>
+    </details>
+  </section>
 
   <section>
     <h2>Nœud</h2>
@@ -392,6 +471,15 @@
       erreurs: etat.erreurs
     }, null, 2);
   }
+  // Le texte de l'en-tête ouvre le dépliant et y amène — sans lui, cliquer
+  // sur « Explication du nœud » sauterait à un panneau resté fermé.
+  $("lien-explication").addEventListener("click", function(e){
+    e.preventDefault();
+    var t = $("tutoriel");
+    t.open = true;
+    t.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
   $("rapport").addEventListener("click", function(){
     var t = rapport(), b = $("rapport");
     function fini(m){ b.textContent = m; setTimeout(function(){ b.textContent = "Copier le rapport"; }, 1800); }

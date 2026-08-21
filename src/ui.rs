@@ -270,6 +270,21 @@ mod tests {
         assert!(texte.contains("DNS-rebinding"), "le refus n'explique pas pourquoi");
     }
 
+    /// Le tutoriel est la seule partie de la page écrite pour quelqu'un qui
+    /// n'a pas bâti le nœud. Il se supprime d'un coup de refactor sans que
+    /// rien ne casse — d'où ce garde.
+    #[test]
+    fn la_page_explique_le_noeud_a_qui_ne_le_connait_pas() {
+        assert!(PAGE.contains("Explication du nœud"), "le texte cliquable a disparu");
+        assert!(PAGE.contains("<summary>"), "l'explication doit rester dépliante");
+        // La notion qu'on ne peut PAS se permettre de perdre : une demande
+        // n'est pas une détention.
+        assert!(
+            PAGE.contains("demandé n'est pas détenu"),
+            "le tutoriel n'explique plus la différence entre pin demandé et pin détenu"
+        );
+    }
+
     /// Lecture seule : aucune méthode mutante ne doit apparaître dans la page.
     #[test]
     fn la_page_est_en_lecture_seule() {
