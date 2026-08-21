@@ -112,6 +112,11 @@ const SERVICE_TAG:       &str = "infinity-node";
 const VERSION:           &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PWA_URL:   &str = "https://localhost:5173";
 
+/// Période de réveil de la boucle du menu. Assez court pour qu'une étiquette
+/// ne soit jamais fausse plus d'un quart de seconde, assez long pour que le
+/// fil principal dorme l'essentiel du temps.
+const REVEIL_TRAY: Duration = Duration::from_millis(250);
+
 /// Cap journalier par défaut, configurable via env `INFINITY_BW_CAP_MB`.
 /// 5 Go/jour = ~150 Go/mois — raisonnable pour un nœud résidentiel sur fibre.
 const DEFAULT_BW_CAP_MB: u64 = 5_000;
@@ -759,14 +764,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut held_backends = Some((kubo, nostr));
 
     event_loop.run(move |event, _window, control_flow| {
-        *control_flow = ControlFlow::Poll;
+        /* 🔴 SURTOUT PAS `ControlFlow::Poll` : il réarme un timer à échéance
+           NULLE, la boucle d'événements tourne à vide en continu et le nœud
+           mange **85 % d'un cœur au repos**, page fermée, mesuré au `top` le
+           20/08/2026 (`sample` : `__CFRunLoopDoTimers` → `mk_timer_arm` en
+           boucle). Un nœud censé tourner en fond H24 chauffait la machine
+           pour rafraîchir deux étiquettes toutes les 2 s.
+
+           `WaitUntil` rend la main au système : le fil principal dort jusqu'à
+           la prochaine échéance OU jusqu'au prochain événement de l'OS — un
+           clic dans le menu réveille la boucle immédiatement, il n'est pas
+           attendu par sondage. */
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + REVEIL_TRAY);
 
         if matches!(event, Event::NewEvents(tao::event::StartCause::Init)) {
             info!("event loop initialized");
         }
 
-        // Refresh tray labels (pins + BW) toutes les 2s. Le poll mode
-        // tape ce code en continu donc le throttle est nécessaire.
+        // Refresh tray labels (pins + BW) toutes les 2s — le corps de boucle
+        // s'exécute au plus toutes les REVEIL_TRAY, donc le throttle reste
+        // nécessaire pour ne pas réécrire les étiquettes pour rien.
         if last_refresh.elapsed() > Duration::from_secs(2) {
             last_refresh = Instant::now();
             let (count, _bytes) = pins_for_loop.totals();
@@ -847,4 +864,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests_boucle {
+    /// Cliquet. `ControlFlow::Poll` fait tourner la boucle du menu à vide et
+    /// coûte ~85 % d'un cœur EN PERMANENCE — un défaut qu'aucun test ne peut
+    /// observer autrement, puisque tout fonctionne : rien n'est faux, la
+    /// machine chauffe seulement. On garde donc la trace dans le source.
+    #[test]
+    fn la_boucle_du_menu_ne_tourne_pas_a_vide() {
+        const SOURCE: &str = include_str!("main.rs");
+        /* ⚠️ Deux pièges, tombés tous les deux au premier essai :
+           1. chercher le simple NOM déclenche le cliquet sur son propre
+              commentaire — on cherche donc l'AFFECTATION ;
+           2. écrire la chaîne recherchée en clair la fait trouver dans le
+              test lui-même, `SOURCE` étant ce fichier : le cliquet passait
+              au vert quoi qu'il arrive. On assemble les motifs à
+              l'exécution pour qu'ils n'existent nulle part dans le source. */
+        let interdit = format!("= {}::{}", "ControlFlow", "Poll");
+        let exige    = format!("= {}::{}", "ControlFlow", "WaitUntil");
+        assert!(
+            !SOURCE.contains(&interdit),
+            "le mode sondage est de retour : le nœud va rebrûler un cœur au repos"
+        );
+        assert!(
+            SOURCE.contains(&exige),
+            "la boucle doit rendre la main au système entre deux réveils"
+        );
+    }
 }
