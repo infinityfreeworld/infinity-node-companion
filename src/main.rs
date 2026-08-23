@@ -306,7 +306,22 @@ async fn post_pin(
             if let Err(e) = pc.pin_add(&req.cid).await {
                 return (StatusCode::BAD_GATEWAY, format!("kubo pin failed: {e}")).into_response();
             }
-            pc.object_size(&req.cid).await
+            let mesure = pc.taille_detenue(&req.cid).await;
+            /* Une mesure impossible n'est pas une absence : on l'écrit dans le
+               journal en NOMMANT la raison, sinon le nœud se contente de dire
+               « 0 octet » — ce qu'il a fait pendant des semaines après la mise
+               à jour de kubo, sans que rien ne le signale. */
+            match &mesure {
+                pinning::MesureTaille::Indeterminee(raison) => warn!(
+                    "pin {} : détention INDÉTERMINÉE ({raison}) — enregistrée comme non détenue",
+                    req.cid
+                ),
+                pinning::MesureTaille::NonDetenu => info!(
+                    "pin {} : demande enregistrée, octets pas encore là", req.cid
+                ),
+                pinning::MesureTaille::Detenu(n) => info!("pin {} : {n} octets détenus", req.cid),
+            }
+            mesure.octets()
         }
         None => 0,
     };

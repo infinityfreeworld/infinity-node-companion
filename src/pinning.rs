@@ -86,7 +86,8 @@ pub struct PinRecord {
     pub pinned_at:  u64,
     /// 0 = jamais expirer.
     pub ttl_secs:   u64,
-    /// Taille rapportée par kubo `/object/stat` au moment du pin (octets, 0 si inconnue).
+    /// Octets RÉELLEMENT détenus, mesurés par kubo (`files/stat` hors ligne)
+    /// au moment du pin. Zéro tant que la détention n'est pas prouvée.
     #[serde(default)]
     pub size_bytes: u64,
 }
@@ -190,6 +191,29 @@ impl PinTracker {
         self.resume().detenus
     }
 
+    /// Met à jour les tailles mesurées en UNE fois.
+    ///
+    /// ⚠️ Passer par `upsert` réécrirait le fichier entier à chaque record —
+    /// donc au carré sur une passe de re-mesure. Un verrou, une écriture.
+    /// Renvoie le nombre de records qui ont réellement changé.
+    pub fn maj_tailles(&self, tailles: &[(String, u64)]) -> usize {
+        let mut g = self.inner.lock().expect("pin state lock");
+        let mut changes = 0;
+        for (cid, octets) in tailles {
+            if let Some(rec) = g.pins.get_mut(cid) {
+                if rec.size_bytes != *octets {
+                    rec.size_bytes = *octets;
+                    changes += 1;
+                }
+            }
+        }
+        if changes > 0 {
+            g.resume = calculer_resume(&g.pins);
+            let _ = write_json(&self.data_dir.join(PINS_FILE), &g.pins);
+        }
+        changes
+    }
+
     /// Insère ou met à jour un record + persistance.
     pub fn upsert(&self, rec: PinRecord) {
         let mut g = self.inner.lock().expect("pin state lock");
@@ -277,18 +301,96 @@ impl KuboPinClient {
     }
 
     /// Renvoie `CumulativeSize` (taille du DAG, octets) ou 0 si inconnu.
-    pub async fn object_size(&self, cid: &str) -> u64 {
-        let url = format!("{}/object/stat", self.api_base);
-        let Ok(r) = self.client.post(&url).query(&[("arg", cid)]).send().await else {
-            return 0;
+    /// Combien d'octets le nœud DÉTIENT pour ce CID — ou l'aveu qu'on n'en
+    /// sait rien.
+    ///
+    /// ⚠️ Cette sonde interrogeait `/object/stat`, **supprimé de kubo 0.42** :
+    /// « removed, use 'ipfs dag' or 'ipfs files' instead », HTTP 500. Et
+    /// l'ancienne version traduisait toute erreur en `0`. Résultat mesuré le
+    /// 23/08 sur le nœud du Bâtisseur : un fichier ajouté dans le dépôt de
+    /// kubo lui-même était enregistré « 0 octet, non détenu ». Depuis la mise
+    /// à jour de kubo, **aucun** contenu ne pouvait plus être compté comme
+    /// détenu — le compteur sur lequel repose toute la distinction
+    /// « demandé vs détenu » mesurait le vide.
+    ///
+    /// On interroge donc `files/stat` en mode **hors ligne** : il répond en
+    /// quelques millisecondes, et son échec « block was not found locally »
+    /// est une réponse en soi — le nœud ne détient pas ces octets. Sans
+    /// `offline=true`, kubo partirait chercher le contenu sur le réseau et la
+    /// mesure durerait le temps d'un timeout.
+    pub async fn taille_detenue(&self, cid: &str) -> MesureTaille {
+        let url = format!("{}/files/stat", self.api_base);
+        let reponse = self
+            .client
+            .post(&url)
+            .query(&[("arg", &format!("/ipfs/{cid}")), ("offline", &"true".to_string())])
+            .send()
+            .await;
+        let Ok(r) = reponse else {
+            return MesureTaille::Indeterminee("kubo injoignable".into());
         };
-        if !r.status().is_success() { return 0; }
-        let Ok(j) = r.json::<serde_json::Value>().await else { return 0; };
-        j.get("CumulativeSize").and_then(|v| v.as_u64()).unwrap_or(0)
+        let succes = r.status().is_success();
+        let Ok(corps) = r.text().await else {
+            return MesureTaille::Indeterminee("réponse illisible".into());
+        };
+        interpreter_stat(succes, &corps)
     }
 }
 
+/// Ce que le nœud sait de la détention d'un contenu.
+///
+/// ⚠️ `NonDetenu` et `Indeterminee` ne se confondent PAS : le premier est une
+/// réponse de kubo, le second un aveu d'ignorance. Les écraser tous les deux
+/// en « 0 octet » est exactement ce qui a fait dire au nœud, pendant des
+/// semaines, qu'il ne détenait rien alors que personne n'en savait rien.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MesureTaille {
+    Detenu(u64),
+    NonDetenu,
+    Indeterminee(String),
+}
+
+impl MesureTaille {
+    /// Les octets à enregistrer : zéro tant qu'on n'a pas la preuve du contraire.
+    #[must_use]
+    pub fn octets(&self) -> u64 {
+        match self {
+            Self::Detenu(n) => *n,
+            _ => 0,
+        }
+    }
+}
+
+/// Traduit une réponse de `files/stat` — séparé du réseau pour être éprouvé
+/// sur les corps RÉELS que kubo renvoie.
+#[must_use]
+pub fn interpreter_stat(succes: bool, corps: &str) -> MesureTaille {
+    if succes {
+        return match serde_json::from_str::<serde_json::Value>(corps) {
+            Ok(j) => match j.get("CumulativeSize").and_then(serde_json::Value::as_u64) {
+                Some(n) => MesureTaille::Detenu(n),
+                None => MesureTaille::Indeterminee("réponse sans CumulativeSize".into()),
+            },
+            Err(_) => MesureTaille::Indeterminee("réponse non JSON".into()),
+        };
+    }
+    // Le refus de kubo est informatif : « pas là » n'est pas « je ne sais pas ».
+    if corps.contains("not found locally") || corps.contains("could not find") {
+        return MesureTaille::NonDetenu;
+    }
+    let message = serde_json::from_str::<serde_json::Value>(corps)
+        .ok()
+        .and_then(|j| j.get("Message").and_then(|m| m.as_str().map(str::to_owned)))
+        .unwrap_or_else(|| corps.chars().take(120).collect());
+    MesureTaille::Indeterminee(message)
+}
+
 // ── Janitor ──────────────────────────────────────────────────────────────
+
+/// Combien de demandes re-mesurées par passe. Borne le travail sur un
+/// registre volumineux ; ce qui dépasse est ANNONCÉ dans le journal, jamais
+/// laissé de côté en silence.
+const PLAFOND_REMESURE: usize = 500;
 
 /// Boucle qui tourne toutes les heures, unpinne les expirés via kubo,
 /// puis purge les records.
@@ -310,6 +412,42 @@ pub fn spawn_janitor(rt: &tokio::runtime::Handle, tracker: PinTracker, kubo: Opt
                     tracker.remove(&cid);
                 }
             }
+            /* Re-mesure des demandes restées à zéro. Deux raisons de le faire
+               ici : les octets peuvent arriver APRÈS le pin (kubo va les
+               chercher), et surtout tous les records écrits pendant que la
+               sonde était cassée (kubo 0.42 a supprimé `/object/stat`) portent
+               un zéro qui n'a jamais été mesuré. La vérité converge au lieu de
+               rester figée sur une panne réparée. */
+            if let Some(k) = kubo.as_ref() {
+                let a_mesurer: Vec<String> = tracker
+                    .list_pins()
+                    .into_iter()
+                    .filter(|p| p.size_bytes == 0)
+                    .map(|p| p.cid)
+                    .take(PLAFOND_REMESURE)
+                    .collect();
+                let restants = tracker.list_pins().iter().filter(|p| p.size_bytes == 0).count();
+                if restants > a_mesurer.len() {
+                    info!(
+                        "janitor : {} demandes à re-mesurer, {} traitées cette passe",
+                        restants,
+                        a_mesurer.len()
+                    );
+                }
+                let mut trouves = Vec::new();
+                for cid in a_mesurer {
+                    if let MesureTaille::Detenu(n) = k.taille_detenue(&cid).await {
+                        if n > 0 {
+                            trouves.push((cid, n));
+                        }
+                    }
+                }
+                if !trouves.is_empty() {
+                    let n = tracker.maj_tailles(&trouves);
+                    info!("janitor : {n} demandes deviennent des contenus DÉTENUS");
+                }
+            }
+
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
@@ -344,6 +482,71 @@ mod tests {
             ttl_secs: 0,
             size_bytes,
         }
+    }
+
+    /// La mise à jour groupée doit compter juste ET tenir le résumé à jour :
+    /// c'est elle qui fait basculer une demande en contenu détenu, donc elle
+    /// qui alimente le chiffre affiché au Bâtisseur.
+    #[test]
+    fn la_maj_groupee_compte_les_vrais_changements() {
+        let t = tracker_jetable("maj-groupee");
+        t.upsert(rec("a", 0));
+        t.upsert(rec("b", 0));
+        t.upsert(rec("c", 7));
+
+        let changes = t.maj_tailles(&[
+            ("a".to_string(), 100),        // devient détenu
+            ("c".to_string(), 7),          // inchangé → ne compte pas
+            ("absent".to_string(), 42),    // inconnu → ignoré
+        ]);
+        assert_eq!(changes, 1, "un seul record a réellement changé");
+        assert_eq!(t.resume(), ResumePins { enregistres: 3, octets: 107, detenus: 2 });
+        assert_eq!(
+            t.resume(),
+            calculer_resume(&t.inner.lock().expect("verrou").pins),
+            "le résumé doit suivre une mise à jour groupée comme une simple écriture"
+        );
+        assert_eq!(t.maj_tailles(&[]), 0, "rien à faire ne change rien");
+    }
+
+    /// Les corps RÉELS renvoyés par kubo 0.42, relevés le 23/08 sur le nœud
+    /// du Bâtisseur. Le troisième cas est celui qui a coûté des semaines de
+    /// mesure fausse : l'endpoint avait disparu et l'erreur était traduite en
+    /// « 0 octet », donc en « ne détient rien ».
+    #[test]
+    fn les_trois_reponses_de_kubo_se_distinguent() {
+        let detenu = r#"{"Hash":"QmSeBw","Size":46,"CumulativeSize":54,"Blocks":0,"Type":"file"}"#;
+        assert_eq!(interpreter_stat(true, detenu), MesureTaille::Detenu(54));
+
+        let absent = r#"{"Message":"block was not found locally (offline): ipld: could not find QmYwAP","Code":0,"Type":"error"}"#;
+        assert_eq!(interpreter_stat(false, absent), MesureTaille::NonDetenu);
+
+        let disparu = r#"{"Message":"removed, use 'ipfs dag' or 'ipfs files' instead","Code":0,"Type":"error"}"#;
+        match interpreter_stat(false, disparu) {
+            MesureTaille::Indeterminee(raison) => assert!(
+                raison.contains("removed"),
+                "la raison doit nommer la panne, pas la taire : {raison}"
+            ),
+            autre => panic!("un endpoint disparu n'est PAS une absence de contenu : {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn une_reponse_incomprehensible_ne_devient_jamais_zero_detenu() {
+        for corps in ["", "<html>502</html>", "{}", r#"{"Size":12}"#] {
+            match interpreter_stat(true, corps) {
+                MesureTaille::Indeterminee(_) => {}
+                autre => panic!("« {corps} » aurait dû rester indéterminé, rendu : {autre:?}"),
+            }
+        }
+    }
+
+    /// Le seul chiffre qu'on ait le droit d'enregistrer.
+    #[test]
+    fn seule_une_detention_prouvee_compte_des_octets() {
+        assert_eq!(MesureTaille::Detenu(54).octets(), 54);
+        assert_eq!(MesureTaille::NonDetenu.octets(), 0);
+        assert_eq!(MesureTaille::Indeterminee("kubo muet".into()).octets(), 0);
     }
 
     /// Le résumé est tenu à jour à l'écriture : il ne doit JAMAIS diverger de
