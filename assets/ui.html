@@ -270,7 +270,7 @@
 
   <section class="large">
     <h2>Brut</h2>
-    <details><summary>voir les réponses telles quelles</summary><pre id="f-brut">—</pre></details>
+    <details id="brut-details"><summary>voir les réponses telles quelles</summary><pre id="f-brut">—</pre></details>
   </section>
 
 </main>
@@ -281,6 +281,10 @@
 (function(){
   "use strict";
   var $ = function(id){ return document.getElementById(id); };
+  // Au-delà, la liste des pins est coupée — et le dit.
+  var PLAFOND_LIGNES = 200;
+  // Dernières données réellement dessinées, pour ne pas redessiner à l'identique.
+  var rendu = { pins: null, tiles: null };
   var etat = {
     snapshot: null, source: "—", derniereMaj: 0,
     pins: null, policy: null, tiles: null, relay: null, ipfs: null,
@@ -369,20 +373,41 @@
     }
     if (etat.devices !== null) $("f-devices").innerHTML = etat.devices;
 
-    if (etat.tiles) {
+    // ⚠️ Ces deux tableaux étaient reconstruits à CHAQUE trame du flux (deux
+    // fois par seconde). Avec dix pins ça ne se voit pas ; un vrai nœud de
+    // stockage en aura des milliers, et le navigateur rebâtirait des milliers
+    // de lignes deux fois par seconde pour des chiffres qui n'ont pas bougé.
+    // Les listes ne changent qu'au tour lent (15 s) : on les redessine quand
+    // leur donnée change, pas quand l'horloge tourne.
+    if (etat.tiles && etat.tiles !== rendu.tiles) {
+      rendu.tiles = etat.tiles;
       var a = etat.tiles.archives || [];
       $("f-tuiles").innerHTML = a.length ? a.map(function(t){
         return "<tr><td>" + t.name + "</td><td>" + octets(t.sizeBytes) + "</td><td>" +
           (t.manifestUrl ? '<span class="ok">présent</span>' : '<span class="alerte">absent</span>') + "</td></tr>";
       }).join("") : '<tr><td colspan="3" class="nul">aucune archive</td></tr>';
     }
-    if (etat.pins) {
-      $("f-liste-pins").innerHTML = etat.pins.length ? etat.pins.map(function(p){
+    if (etat.pins && etat.pins !== rendu.pins) {
+      rendu.pins = etat.pins;
+      // Plafond d'affichage — et on DIT ce qu'on ne montre pas : une liste
+      // muettement coupée se lit « voilà tous mes pins ».
+      // Le total vient du handshake, pas de la liste : la liste est bornée à
+      // la source (`?limite=`), donc elle ne peut pas dire combien il en reste.
+      var totalPins = (etat.snapshot && typeof etat.snapshot.managedPins === "number")
+        ? etat.snapshot.managedPins : etat.pins.length;
+      var montres = etat.pins.slice(0, PLAFOND_LIGNES);
+      var lignes = montres.map(function(p){
         return "<tr><td>" + p.cid + "</td><td>" + (p.module || "—") + "</td><td>" +
           new Date(p.pinned_at * 1000).toLocaleString("fr-FR") + "</td><td>" +
           Math.round(p.ttl_secs / 3600) + " h</td><td class=\"" + (p.size_bytes ? "" : "rouge") + "\">" +
           (p.size_bytes ? octets(p.size_bytes) : "0 — non détenu") + "</td></tr>";
-      }).join("") : '<tr><td colspan="5" class="nul">aucun pin</td></tr>';
+      });
+      if (totalPins > montres.length) {
+        lignes.push('<tr><td colspan="5" class="nul">… et ' +
+          (totalPins - montres.length) + " autres, non affichés (les " +
+          PLAFOND_LIGNES + " premiers seulement). Le rapport, lui, les contient tous.</td></tr>");
+      }
+      $("f-liste-pins").innerHTML = lignes.length ? lignes.join("") : '<tr><td colspan="5" class="nul">aucun pin</td></tr>';
     }
 
     var st = etat.stockage;
@@ -419,7 +444,10 @@
     }
 
     controles();
-    $("f-brut").textContent = rapport();
+    // `rapport()` sérialise tout l'état — journal et pins compris. Le faire à
+    // chaque trame pour un panneau replié, c'est payer deux fois par seconde
+    // pour ce que personne ne lit.
+    if ($("brut-details").open) $("f-brut").textContent = rapport();
   }
 
   // ── contrôles (dérivés, jamais recalculés ailleurs) ────────────────
@@ -514,6 +542,12 @@
     t.scrollIntoView({ behavior: "smooth", block: "start" });
   });
 
+  // Ouvrir le panneau doit le remplir immédiatement, sans attendre la trame
+  // suivante — sinon il s'ouvre sur un tiret.
+  $("brut-details").addEventListener("toggle", function(){
+    if ($("brut-details").open) $("f-brut").textContent = rapport();
+  });
+
   $("rapport").addEventListener("click", function(){
     var t = rapport(), b = $("rapport");
     function fini(m){ b.textContent = m; setTimeout(function(){ b.textContent = "Copier le rapport"; }, 1800); }
@@ -588,7 +622,7 @@
   function tourSecondaire(){
     Promise.all([
       lire("/healthz", "healthz", function(t){ return String(t).trim(); }),
-      lire("/api/pins", "pins"),
+      lire("/api/pins?limite=" + PLAFOND_LIGNES, "pins"),
       lire("/api/policy", "policy"),
       lire("/api/tiles", "tiles"),
       lire("/api/stockage", "stockage"),

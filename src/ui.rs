@@ -213,7 +213,10 @@ mod tests {
                     Some(f) => f,
                     None => break,
                 };
+                // Une route est un CHEMIN : on coupe la chaîne de requête
+                // (`/api/pins?limite=` + valeur assemblée à l'exécution).
                 let chemin = &reste[..fin];
+                let chemin = chemin.split('?').next().unwrap_or(chemin);
                 if chemin.starts_with('/') && !citees.contains(&chemin) {
                     citees.push(chemin);
                 }
@@ -283,6 +286,18 @@ mod tests {
         assert!(
             PAGE.contains("demandé n'est pas détenu"),
             "le tutoriel n'explique plus la différence entre pin demandé et pin détenu"
+        );
+    }
+
+    /// Une liste coupée doit se dire coupée. Le plafond d'affichage des pins
+    /// est une décision d'ergonomie ; l'annoncer est une question d'honnêteté —
+    /// sans la mention, la page affirme « voilà tous mes pins ».
+    #[test]
+    fn une_liste_tronquee_lannonce() {
+        assert!(PAGE.contains("PLAFOND_LIGNES"), "le plafond d'affichage a disparu");
+        assert!(
+            PAGE.contains("non affichés"),
+            "la page coupe la liste des pins sans le dire"
         );
     }
 
