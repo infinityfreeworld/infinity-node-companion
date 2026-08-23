@@ -30,6 +30,11 @@ use std::{
 };
 use tracing::{info, warn};
 
+/// Délai laissé à un sous-processus pour prouver qu'il tient debout. Assez
+/// long pour couvrir un échec immédiat (verrou pris, port occupé, config
+/// illisible), assez court pour ne pas retarder le démarrage du nœud.
+const GRACE_DEMARRAGE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Représente un sous-processus géré. Tué au Drop.
 pub struct ManagedChild {
     name:  String,
@@ -80,8 +85,30 @@ impl ManagedChild {
         }
 
         info!(target: "supervisor", "spawned '{name}' (pid {})", child.id());
-        ecrire_pid(name, child.id());
-        Some(Self { name: name.to_owned(), child })
+
+        /* ⚠️ « Lancé » n'est pas « vivant ». Le 23/08, kubo est mort 30 ms
+           après son lancement (`repo.lock: someone else has the lock`, un
+           fantôme d'un run précédent tenait le dépôt) — et le nœud a continué
+           d'annoncer la capacité `ipfs` à la PWA, passerelle comprise. Un
+           spawn réussi ne prouve que l'exécution du fichier, jamais que le
+           service tourne. On laisse donc une courte grâce, puis on VÉRIFIE. */
+        std::thread::sleep(GRACE_DEMARRAGE);
+        let mut enfant = Self { name: name.to_owned(), child };
+        match enfant.child.try_wait() {
+            Ok(Some(statut)) => {
+                warn!(
+                    target: "supervisor",
+                    "'{name}' est mort {} ms après son lancement ({statut}) — capacité NON annoncée",
+                    GRACE_DEMARRAGE.as_millis()
+                );
+                return None;      // le Drop nettoie le pid et récolte le zombie
+            }
+            Ok(None) => {}        // toujours là : c'est ce qu'on voulait
+            Err(e) => warn!(target: "supervisor", "état de '{name}' illisible : {e}"),
+        }
+
+        ecrire_pid(name, enfant.child.id());
+        Some(enfant)
     }
 
 }
@@ -195,6 +222,62 @@ fn ramasser_orphelin(nom: &str, programme: &OsStr) {
     let _ = std::fs::remove_file(&fichier);
 }
 
+/// Qui tient ce fichier ouvert ? `lsof` répond là où aucun fichier de PID ne
+/// peut aider : un fantôme lancé par une version antérieure du nœud — celle
+/// d'avant les fichiers de PID — n'a laissé aucune trace à nous.
+///
+/// Retourne `(pid, commande)`.
+#[must_use]
+pub fn detenteur_du_verrou(chemin: &std::path::Path) -> Option<(u32, String)> {
+    let out = Command::new("lsof")
+        .args(["-F", "pc", "--"])
+        .arg(chemin)
+        .output()
+        .ok()?;
+    analyser_lsof(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Analyse la sortie `lsof -F pc` : une ligne `p<pid>`, une ligne `c<commande>`.
+/// Pure, donc éprouvable sans verrou ni processus.
+#[must_use]
+pub fn analyser_lsof(sortie: &str) -> Option<(u32, String)> {
+    let mut pid = None;
+    for ligne in sortie.lines() {
+        let (marque, reste) = ligne.split_at(ligne.char_indices().nth(1).map_or(ligne.len(), |(i, _)| i));
+        match marque {
+            "p" => pid = reste.trim().parse::<u32>().ok(),
+            "c" => {
+                if let Some(p) = pid {
+                    return Some((p, reste.trim().to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Termine le détenteur d'un verrou s'il s'agit bien du binaire attendu.
+/// `true` si un fantôme a été arrêté.
+pub fn liberer_verrou(chemin: &std::path::Path, programme_attendu: &str) -> bool {
+    let Some((pid, commande)) = detenteur_du_verrou(chemin) else { return false };
+    if !doit_tuer(Some(&commande), programme_attendu) {
+        return false;
+    }
+    warn!(target: "supervisor", "le verrou {chemin:?} est tenu par '{commande}' (pid {pid}) d'un run précédent — arrêt");
+    let _ = Command::new("kill").arg(pid.to_string()).status();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if ligne_de_commande(pid).is_none() {
+            info!(target: "supervisor", "verrou libéré (pid {pid})");
+            return true;
+        }
+    }
+    warn!(target: "supervisor", "le détenteur du verrou (pid {pid}) résiste — SIGKILL");
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +307,48 @@ mod tests {
             Some("/Users/med/.cargo/bin/nostr-rs-relay --config /x/config.toml"),
             "/opt/homebrew/bin/nostr-rs-relay"
         ));
+    }
+
+    /// Le cœur du correctif : un binaire qui rend la main aussitôt ne doit
+    /// PAS être présenté comme un service en marche.
+    #[test]
+    fn un_enfant_qui_meurt_aussitot_nest_pas_annonce_vivant() {
+        // `false` s'exécute parfaitement… et se termine immédiatement.
+        assert!(
+            ManagedChild::spawn("essai-mort", Command::new("false")).is_none(),
+            "un enfant déjà mort a été présenté comme vivant"
+        );
+        // Rien ne doit rester derrière : ni fichier de PID, ni zombie.
+        assert!(!fichier_pid("essai-mort").exists());
+    }
+
+    #[test]
+    fn un_enfant_qui_tient_debout_est_bien_rendu() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let enfant = ManagedChild::spawn("essai-vivant", cmd);
+        assert!(enfant.is_some(), "un processus vivant doit être rendu");
+        assert!(fichier_pid("essai-vivant").exists(), "son PID doit être noté");
+        drop(enfant);                                   // tue et nettoie
+        assert!(!fichier_pid("essai-vivant").exists());
+    }
+
+    #[test]
+    fn on_lit_le_detenteur_dans_la_sortie_lsof() {
+        let sortie = "p22275\ncipfs\n";
+        assert_eq!(analyser_lsof(sortie), Some((22275, "ipfs".to_string())));
+        // Plusieurs détenteurs : le premier suffit, on ne tue qu'un fantôme
+        // à la fois et on relira le verrou ensuite.
+        let deux = "p1\ncipfs\np2\ncautre\n";
+        assert_eq!(analyser_lsof(deux), Some((1, "ipfs".to_string())));
+    }
+
+    #[test]
+    fn une_sortie_lsof_vide_ou_incomplete_ne_designe_personne() {
+        assert_eq!(analyser_lsof(""), None);
+        assert_eq!(analyser_lsof("cipfs\n"), None, "une commande sans pid ne désigne rien");
+        assert_eq!(analyser_lsof("p\ncipfs\n"), None, "un pid vide n'est pas un pid");
+        assert_eq!(analyser_lsof("pabc\ncipfs\n"), None);
     }
 
     #[test]

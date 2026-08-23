@@ -116,6 +116,16 @@ impl KuboBackend {
             info!("kubo: démarrage en MODE PRIVÉ (swarm.key détectée)");
         }
 
+        /* Un kubo d'un run précédent tient peut-être encore `repo.lock` — le
+           23/08, un daemon vieux de 41 h le gardait, notre kubo mourait en
+           30 ms sur « someone else has the lock », et le nœud annonçait quand
+           même la capacité `ipfs`. Le fichier de PID ne suffit pas ici : ce
+           fantôme-là avait été lancé par une version du nœud qui n'en écrivait
+           pas encore. On demande donc au système QUI tient le verrou. */
+        if crate::supervisor::liberer_verrou(&repo.join("repo.lock"), BIN) {
+            info!("kubo: verrou du dépôt libéré, démarrage possible");
+        }
+
         let mut cmd = Command::new(BIN);
         cmd.args(["daemon", "--migrate=true", "--enable-pubsub-experiment"])
             .env("IPFS_PATH", &repo);
