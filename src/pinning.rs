@@ -96,6 +96,30 @@ pub struct PinRecord {
 pub struct PinState {
     pub policy: PinPolicy,
     pub pins:   HashMap<String, PinRecord>,   // cid → record
+    /// Tenu à jour à chaque mutation — jamais recalculé à la lecture.
+    pub resume: ResumePins,
+}
+
+/// Les trois chiffres que tout le monde demande : combien de demandes,
+/// combien d'octets, et combien sont RÉELLEMENT détenus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResumePins {
+    pub enregistres: u64,
+    pub octets:      u64,
+    pub detenus:     u64,
+}
+
+/// Un seul parcours pour les trois chiffres.
+#[must_use]
+pub fn calculer_resume(pins: &HashMap<String, PinRecord>) -> ResumePins {
+    let mut r = ResumePins { enregistres: pins.len() as u64, ..ResumePins::default() };
+    for p in pins.values() {
+        r.octets += p.size_bytes;
+        if p.size_bytes > 0 {
+            r.detenus += 1;
+        }
+    }
+    r
 }
 
 #[derive(Clone)]
@@ -116,7 +140,7 @@ impl PinTracker {
             .unwrap_or_default();
 
         Self {
-            inner:    Arc::new(Mutex::new(PinState { policy, pins })),
+            inner:    Arc::new(Mutex::new(PinState { policy, resume: calculer_resume(&pins), pins })),
             data_dir,
         }
     }
@@ -137,10 +161,22 @@ impl PinTracker {
 
     /// Compte total + somme des tailles (octets).
     pub fn totals(&self) -> (u64, u64) {
-        let g = self.inner.lock().expect("pin state lock");
-        let count = g.pins.len() as u64;
-        let bytes = g.pins.values().map(|p| p.size_bytes).sum();
-        (count, bytes)
+        let r = self.resume();
+        (r.enregistres, r.octets)
+    }
+
+    /// Les trois chiffres d'un coup, sans parcourir la table.
+    ///
+    /// ⚠️ Ils étaient recalculés à CHAQUE lecture — deux parcours complets
+    /// (`totals` puis `held_count`), sous verrou, à chaque tick du flux
+    /// (500 ms **par page ouverte**), à chaque handshake et toutes les 2 s
+    /// pour le menu. Invisible avec dix pins ; avec les dizaines de milliers
+    /// que vise un vrai nœud de stockage, c'est la table entière balayée
+    /// plusieurs fois par seconde, verrou tenu — donc les écritures de pins
+    /// qui attendent. Le résumé est maintenant tenu à jour à l'ÉCRITURE, qui
+    /// réécrit déjà le fichier entier : le calcul y est gratuit en comparaison.
+    pub fn resume(&self) -> ResumePins {
+        self.inner.lock().expect("pin state lock").resume
     }
 
     /// Combien de pins le nœud DÉTIENT réellement, octets à l'appui.
@@ -151,20 +187,21 @@ impl PinTracker {
     /// présenter comme un contenu conservé ; le publier évite à l'interface de
     /// devoir lister tous les pins pour l'apprendre.
     pub fn held_count(&self) -> u64 {
-        let g = self.inner.lock().expect("pin state lock");
-        g.pins.values().filter(|p| p.size_bytes > 0).count() as u64
+        self.resume().detenus
     }
 
     /// Insère ou met à jour un record + persistance.
     pub fn upsert(&self, rec: PinRecord) {
         let mut g = self.inner.lock().expect("pin state lock");
         g.pins.insert(rec.cid.clone(), rec);
+        g.resume = calculer_resume(&g.pins);
         let _ = write_json(&self.data_dir.join(PINS_FILE), &g.pins);
     }
 
     pub fn remove(&self, cid: &str) -> Option<PinRecord> {
         let mut g = self.inner.lock().expect("pin state lock");
         let removed = g.pins.remove(cid);
+        g.resume = calculer_resume(&g.pins);
         if removed.is_some() {
             let _ = write_json(&self.data_dir.join(PINS_FILE), &g.pins);
         }
@@ -293,6 +330,7 @@ mod tests {
             inner:    Arc::new(Mutex::new(PinState {
                 policy: PinPolicy::default(),
                 pins:   HashMap::new(),
+                resume: ResumePins::default(),
             })),
             data_dir: dir,
         }
@@ -306,6 +344,57 @@ mod tests {
             ttl_secs: 0,
             size_bytes,
         }
+    }
+
+    /// Le résumé est tenu à jour à l'écriture : il ne doit JAMAIS diverger de
+    /// ce qu'un parcours complet donnerait. Un point de mutation qui oublie de
+    /// le rafraîchir fait mentir tous les compteurs du nœud, en silence —
+    /// c'est le risque qu'on prend en cessant de recalculer à la lecture, donc
+    /// c'est ce que ce test surveille.
+    #[test]
+    fn le_resume_ne_derive_jamais_de_la_table() {
+        let t = tracker_jetable("resume");
+        let verifier = |t: &PinTracker, ou: &str| {
+            let attendu = calculer_resume(&t.inner.lock().expect("verrou").pins);
+            assert_eq!(t.resume(), attendu, "résumé périmé après {ou}");
+        };
+
+        t.upsert(rec("a", 0));
+        t.upsert(rec("b", 10));
+        t.upsert(rec("c", 0));
+        verifier(&t, "des insertions");
+
+        t.remove("b");
+        verifier(&t, "une suppression");
+
+        t.upsert(rec("c", 5));          // une demande devient détenue
+        verifier(&t, "une mise à jour");
+
+        t.remove("inexistant");
+        verifier(&t, "une suppression sans effet");
+
+        assert_eq!(
+            t.resume(),
+            ResumePins { enregistres: 2, octets: 5, detenus: 1 },
+            "et les chiffres eux-mêmes doivent être justes"
+        );
+    }
+
+    /// Un tracker qui recharge un fichier existant doit démarrer avec le bon
+    /// résumé — pas avec des zéros qui se corrigeraient à la première écriture.
+    #[test]
+    fn le_resume_est_juste_des_le_chargement() {
+        let pins: HashMap<String, PinRecord> = [
+            ("x".to_string(), rec("x", 100)),
+            ("y".to_string(), rec("y", 0)),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            calculer_resume(&pins),
+            ResumePins { enregistres: 2, octets: 100, detenus: 1 }
+        );
+        assert_eq!(calculer_resume(&HashMap::new()), ResumePins::default());
     }
 
     /// LE relevé du 17/08/2026 : dix enregistrements, zéro octet détenu.
