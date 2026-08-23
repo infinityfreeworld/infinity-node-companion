@@ -94,9 +94,19 @@ pub fn init() -> Result<SecurityStack, SecurityInitError> {
     let data_dir = ensure_data_dir()?;
     info!(?data_dir, "security data dir ready");
 
+    /* ⚠️ Cette étape a duré **13,7 s** au démarrage du 23/08, et personne ne
+       savait laquelle des trois opérations la consommait : lecture du
+       trousseau, ouverture du coffre (Argon2id 64 Mio), chargement de
+       l'identité. C'est la plus longue attente que le Bâtisseur subisse, et
+       elle était opaque. On la chronomètre poste par poste — le journal du
+       nœud affiche déjà ces lignes, donc le prochain démarrage lent se
+       diagnostique tout seul. */
+    let debut = std::time::Instant::now();
     let kc = OsKeyring::new();
     let passphrase = ensure_boot_passphrase(&kc)?;
+    info!(ms = debut.elapsed().as_millis(), "trousseau : phrase d'amorçage lue");
 
+    let debut_coffre = std::time::Instant::now();
     let vault_path = data_dir.join(VAULT_FILENAME);
     let vault = if vault_path.exists() {
         Vault::open(vault_path.clone(), passphrase)?
@@ -105,6 +115,9 @@ pub fn init() -> Result<SecurityStack, SecurityInitError> {
         Vault::create(vault_path.clone(), passphrase)?
     };
     let vault = Arc::new(vault);
+    info!(ms = debut_coffre.elapsed().as_millis(), "coffre ouvert (Argon2id + SQLCipher)");
+
+    let debut_identite = std::time::Instant::now();
 
     /* Nom de l'identité dans le trousseau. Une instance dont l'état a été
        déplacé (INFINITY_DATA_DIR) reçoit SA PROPRE identité : elle ouvre un
@@ -138,6 +151,7 @@ pub fn init() -> Result<SecurityStack, SecurityInitError> {
         }
         Err(e) => return Err(SecurityInitError::Identity(e)),
     };
+    info!(ms = debut_identite.elapsed().as_millis(), "identité chargée");
     let identity = Arc::new(identity);
 
     let auth = Arc::new(AuthService::new(vault.clone(), identity.clone()));
