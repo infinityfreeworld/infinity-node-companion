@@ -71,6 +71,7 @@ mod amorcage;
 mod api;
 mod autostart;
 mod chemins;
+mod dialogue;
 mod bandwidth;
 mod ipfs_api;
 mod ipfs_private;
@@ -111,7 +112,13 @@ use pinning::{KuboPinClient, PinPolicy, PinRecord, PinTracker};
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7474";
 const SERVICE_TAG:       &str = "infinity-node";
 const VERSION:           &str = env!("CARGO_PKG_VERSION");
-const DEFAULT_PWA_URL:   &str = "https://localhost:5173";
+/// L'application Infinity, celle que le Bâtisseur utilise.
+///
+/// ⚠️ C'était `https://localhost:5173` — l'adresse du serveur de
+/// développement. « Ouvrir Infinity » depuis la barre de menus ouvrait donc
+/// une page locale vide chez tous ceux qui ne développent pas le projet.
+/// L'adresse de développement reste accessible par `INFINITY_URL`.
+const DEFAULT_PWA_URL:   &str = "https://infinity-freeworld.com";
 
 /// Période de réveil de la boucle du menu. Assez court pour qu'une étiquette
 /// ne soit jamais fausse plus d'un quart de seconde, assez long pour que le
@@ -847,6 +854,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // doit avoir accès physique/SSH à la machine pour le
                     // lire, puis le coller manuellement dans la PWA.
                     let token = auth_for_loop.create_pairing_token(None);
+                    /* La fenêtre du système remplace la console, que personne
+                       ne voit quand le nœud est lancé depuis le Finder : le
+                       clic ne produisait RIEN. On garde l'impression console
+                       comme filet (lancement en terminal, SSH, autre OS).
+                       ⚠️ `println!` ne passe PAS par `tracing` : le jeton
+                       n'entre donc pas dans le journal en mémoire, que la page
+                       sert sans authentification. Ne jamais le journaliser. */
+                    let montre = dialogue::afficher_jeton_appairage(&token.token);
                     println!(
                         "\n\
                          ╔══════════════════════════════════════════════════════════════════╗\n\
@@ -856,7 +871,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                          ╚══════════════════════════════════════════════════════════════════╝\n",
                         token.token
                     );
-                    info!("pairing token generated (visible in console only)");
+                    if montre {
+                        info!("jeton d'appairage généré — affiché dans une fenêtre du système");
+                    } else {
+                        warn!("jeton d'appairage généré — visible SEULEMENT dans la console");
+                    }
                 }
                 id if id == &id_autostart => {
                     if let Some(auto) = autostart.as_ref() {
