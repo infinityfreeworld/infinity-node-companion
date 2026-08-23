@@ -39,7 +39,7 @@ use axum::{
 use infinity_auth::SignatureHeader;
 use infinity_identity::PublicKey;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::AppState;
 
@@ -154,14 +154,27 @@ pub async fn auth_compat_middleware(
             method, path,
         );
     } else {
-        // Pas de header → migration : on log + on laisse passer.
-        // Quand toutes les PWAs déployées auront migré, on bascule
-        // ces routes sur `auth_middleware` strict.
-        warn!(
-            "auth-compat {} {}: UNSIGNED request (deprecated, migrate to \
-             InfinitySig auth before companion v0.3)",
-            method, path,
-        );
+        /* Pas de header → migration : on log + on laisse passer. Quand toutes
+           les PWAs déployées auront migré, on bascule ces routes sur
+           `auth_middleware` strict.
+
+           ⚠️ La sévérité dépend de la MÉTHODE, et pas par coquetterie : le
+           tableau de bord local relit ces routes toutes les 15 s, ce qui
+           noyait le journal du nœud sous des avertissements permanents — au
+           point de rendre illisible la seule fenêtre qu'on ait sur un
+           démarrage qui se passe mal. Une lecture non signée depuis la page
+           du nœud est normale et le restera ; une ÉCRITURE non signée est
+           exactement ce que la migration doit faire disparaître, elle garde
+           donc son avertissement. */
+        if method.is_safe() {
+            debug!("auth-compat {} {}: lecture non signée", method, path);
+        } else {
+            warn!(
+                "auth-compat {} {}: ÉCRITURE non signée (obsolète, passer à \
+                 l'authentification InfinitySig avant companion v0.3)",
+                method, path,
+            );
+        }
     }
 
     let new_request = Request::from_parts(parts, Body::from(body_bytes));

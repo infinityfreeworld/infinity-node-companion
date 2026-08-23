@@ -41,6 +41,17 @@ mkdir -p "$SAUVEGARDES"
 cp "$CIBLE" "$SAUVEGARDES/infinity-node.avant-$horodatage"
 echo "▸ sauvegarde : $SAUVEGARDES/infinity-node.avant-$horodatage"
 
+# Rotation : 6,8 Mo par installation, et on installe plusieurs fois par jour
+# pendant un chantier — 39 Mo s'étaient déjà accumulés en deux jours.
+# ⚠️ Le motif ne vise QUE nos sauvegardes automatiques (`avant-<date>`) :
+# celles nommées à la main (`avant-ui-…`, `avant-held-…`) sont des points de
+# retour choisis, elles ne se suppriment pas toutes seules.
+ls -t "$SAUVEGARDES"/infinity-node.avant-2[0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9] 2>/dev/null \
+  | tail -n +4 | while read -r vieille; do
+      echo "  ↳ purge $(basename "$vieille")"
+      rm -f "$vieille"
+    done
+
 echo "▸ arrêt du nœud…"
 osascript -e 'tell application "Infinity Node" to quit' >/dev/null 2>&1 || true
 for _ in $(seq 1 20); do

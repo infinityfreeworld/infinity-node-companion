@@ -127,7 +127,11 @@ impl KuboBackend {
         }
 
         let mut cmd = Command::new(BIN);
-        cmd.args(["daemon", "--migrate=true", "--enable-pubsub-experiment"])
+        /* `--enable-pubsub-experiment` a été retiré : kubo 0.42 le déclare
+           obsolète à chaque démarrage, et RIEN dans le companion n'utilise
+           pubsub (aucune occurrence dans le source). Un drapeau qu'on ne
+           comprend plus est un drapeau qu'on retire. */
+        cmd.args(["daemon", "--migrate=true"])
             .env("IPFS_PATH", &repo);
         if private {
             cmd.env("LIBP2P_FORCE_PNET", "1");
