@@ -344,8 +344,28 @@ async fn delete_pin(
     }
 }
 
-async fn get_pins(State(state): State<AppState>) -> impl IntoResponse {
-    Json(state.pins.list_pins())
+/// Combien de pins renvoyer au plus. Sans borne, un nœud qui en détient des
+/// dizaines de milliers sérialise tout son registre à chaque rafraîchissement
+/// de page — pour un tableau qui n'en montre que les deux cents premiers.
+#[derive(Deserialize)]
+struct PinsQuery {
+    limite: Option<usize>,
+}
+
+async fn get_pins(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PinsQuery>,
+) -> impl IntoResponse {
+    let mut pins = state.pins.list_pins();
+    /* ⚠️ Pas de borne PAR DÉFAUT : la PWA déjà déployée attend le registre
+       entier, et le tronquer sans qu'elle l'ait demandé serait exactement le
+       « faux succès » qu'on passe notre temps à traquer. Le compte total reste
+       lisible dans le handshake (`managedPins`), donc l'appelant qui borne sait
+       toujours ce qu'il ne voit pas. */
+    if let Some(n) = q.limite {
+        pins.truncate(n);
+    }
+    Json(pins)
 }
 
 async fn get_policy(State(state): State<AppState>) -> impl IntoResponse {
